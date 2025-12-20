@@ -95,13 +95,16 @@ class TextEncodeQwenImageEditPlusMod(io.ComfyNode):
                 s = comfy.utils.common_upscale(samples, width, height, "lanczos", "center")
                 images_vl.append(s.movedim(1, -1))
                 if vae is not None:
-                    twidth = target_latent["samples"].shape[-1] * 8
-                    theight = target_latent["samples"].shape[-2] * 8
+                    twidth = 0
+                    theight = 0
                     if target_latent is None:                        
                         total = int(ref_image_size * ref_image_size)
                         scale_by = math.sqrt(total / (samples.shape[3] * samples.shape[2]))
                         twidth = round(samples.shape[3] * scale_by / 32.0) * 32
                         theight = round(samples.shape[2] * scale_by / 32.0) * 32
+                    else:
+                        twidth = target_latent["samples"].shape[-1] * 8
+                        theight = target_latent["samples"].shape[-2] * 8
                     print("twidth, theight", twidth, theight)
                     print("samples.shape[3], samples.shape[2]", samples.shape[3], samples.shape[2])
                     if samples.shape[3] == twidth and samples.shape[2] == theight:
