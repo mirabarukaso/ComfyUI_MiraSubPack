@@ -10,6 +10,7 @@ class ImageMergeByPixelAlign(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="ImageMergeByPixelAlign_MiraSubPack",
+            display_name="Image Merge By Pixel Align",
             category=CAT,
             inputs=[
                 io.Image.Input("base_img", optional=False),

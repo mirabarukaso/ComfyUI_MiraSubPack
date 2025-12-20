@@ -13,6 +13,7 @@ class TextEncodeQwenImageEditMod(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="TextEncodeQwenImageEdit_MiraSubPack",
+            display_name="Text Encode QwenImage Edit Mira",
             category=CAT,
             inputs=[
                 io.Clip.Input("clip"),
@@ -56,6 +57,7 @@ class TextEncodeQwenImageEditPlusMod(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="TextEncodeQwenImageEditPlus_MiraSubPack",
+            display_name="Text Encode QwenImage Edit Plus Mira",
             category=CAT,
             inputs=[
                 io.Clip.Input("clip"),
