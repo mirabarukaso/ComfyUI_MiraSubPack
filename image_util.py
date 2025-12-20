@@ -14,10 +14,14 @@ class ImageMergeByPixelAlign(io.ComfyNode):
             inputs=[
                 io.Image.Input("base_img", optional=False),
                 io.Image.Input("patch_img", optional=False),
+                io.Int.Input("bg_color_r", default=255, min=0, max=255, step=1),
+                io.Int.Input("bg_color_g", default=0, min=0, max=255, step=1),
+                io.Int.Input("bg_color_b", default=255, min=0, max=255, step=1),
+                io.Int.Input("bg_tolerance", default=10, min=0, max=100, step=1),
                 io.Float.Input("core_coverage", default=0.6, min=0.0, max=1.0, step=0.05),
                 io.Int.Input("blend_width", default=30, min=0, max=200, step=5),
                 io.Float.Input("blend_strength", default=0.7, min=0.0, max=1.0, step=0.05),
-                io.Combo.Input("blend_mode", default="smooth", options=["smooth", "linear", "none"]),
+                io.Combo.Input("blend_mode", default="smooth", options=["smooth", "linear", "full_gradient", "none"]),
                 io.Int.Input("sift_features", default=5000, min=1000, max=10000, step=500),
                 io.Float.Input("match_ratio", default=0.7, min=0.5, max=0.9, step=0.05),
             ],
@@ -27,17 +31,24 @@ class ImageMergeByPixelAlign(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, base_img, patch_img, core_coverage=0.6, blend_width=30, 
+    def execute(cls, base_img, patch_img, bg_color_r=0, bg_color_g=0, bg_color_b=0, 
+                bg_tolerance=10, core_coverage=0.6, blend_width=30, 
                 blend_strength=0.7, blend_mode="smooth", sift_features=5000, 
                 match_ratio=0.7) -> io.NodeOutput:
         """
         Args:
             base_img: Base image tensor
             patch_img: Patch image tensor to merge
+            bg_color_r/g/b: Background color RGB to exclude from patch (0-255)
+            bg_tolerance: Color distance tolerance for background detection
             core_coverage: Core region coverage ratio (0-1), where patch fully covers base
             blend_width: Width of blend transition in pixels from core edge
             blend_strength: Patch opacity in blend region (0=invisible, 1=fully opaque)
-            blend_mode: Blend transition curve ("smooth"=sigmoid, "linear"=linear, "none"=no blend)
+            blend_mode: Blend transition curve 
+                       ("smooth"=sigmoid within blend_width, 
+                        "linear"=linear within blend_width,
+                        "full_gradient"=gradient from core edge to patch edge,
+                        "none"=no blend outside core)
             sift_features: Number of SIFT features to detect
             match_ratio: Lowe's ratio threshold for feature matching
         """
@@ -55,6 +66,7 @@ class ImageMergeByPixelAlign(io.ComfyNode):
             try:
                 result_cv = cls.process_single_image(
                     img_base_cv, img_patch_cv, 
+                    (bg_color_b, bg_color_g, bg_color_r), bg_tolerance,
                     core_coverage, blend_width, blend_strength, blend_mode,
                     sift_features, match_ratio
                 )
@@ -71,8 +83,9 @@ class ImageMergeByPixelAlign(io.ComfyNode):
         return io.NodeOutput(final_output)
 
     @staticmethod
-    def process_single_image(base_img, patch_img, core_coverage, blend_width, 
-                            blend_strength, blend_mode, sift_features, match_ratio):
+    def process_single_image(base_img, patch_img, bg_color, bg_tolerance,
+                            core_coverage, blend_width, blend_strength, blend_mode, 
+                            sift_features, match_ratio):
         """
         Merge patch image onto base using pixel alignment with center-based coverage.
         
@@ -82,8 +95,9 @@ class ImageMergeByPixelAlign(io.ComfyNode):
         3. Background: 100% base image (no patch)
         
         Blend modes:
-        - "smooth": Sigmoid curve for natural falloff
-        - "linear": Linear gradient
+        - "smooth": Sigmoid curve for natural falloff within blend_width
+        - "linear": Linear gradient within blend_width
+        - "full_gradient": Core is 100% opaque, entire outer region gradients to edge
         - "none": No blending outside core (hard edge with alignment only)
         """
         gray_base = cv2.cvtColor(base_img, cv2.COLOR_BGR2GRAY)
@@ -131,8 +145,14 @@ class ImageMergeByPixelAlign(io.ComfyNode):
                                            borderMode=cv2.BORDER_CONSTANT,
                                            borderValue=(0, 0, 0))
 
-        patch_gray = cv2.cvtColor(patch_img, cv2.COLOR_BGR2GRAY)
-        _, original_mask = cv2.threshold(patch_gray, 10, 255, cv2.THRESH_BINARY)
+        bg_color_array = np.array(bg_color, dtype=np.float32)
+        patch_float = patch_img.astype(np.float32)
+        color_distance = np.sqrt(np.sum((patch_float - bg_color_array) ** 2, axis=2))
+        
+        original_mask = (color_distance > bg_tolerance).astype(np.uint8) * 255
+        
+        print(f"[MiraSubPack:ImageMerge] Background color: BGR{bg_color}, tolerance: {bg_tolerance}")
+        print(f"[MiraSubPack:ImageMerge] Detected foreground pixels: {np.sum(original_mask > 0)}")
         
         warped_mask = cv2.warpPerspective(original_mask, M, (w, h),
                                           flags=cv2.INTER_LINEAR,
@@ -175,7 +195,15 @@ class ImageMergeByPixelAlign(io.ComfyNode):
         core_region = dist_from_center <= core_radius
         patch_alpha[core_region] = 1.0
         
-        if blend_width > 0 and blend_mode != "none":
+        if blend_mode == "full_gradient":
+            outer_region = (dist_from_center > core_radius) & (overall_mask > 0)
+            
+            outer_dist_normalized = (dist_from_center[outer_region] - core_radius) / (max_radius - core_radius)
+            outer_dist_normalized = np.clip(outer_dist_normalized, 0, 1)
+            
+            patch_alpha[outer_region] = (1.0 - outer_dist_normalized) * blend_strength
+            
+        elif blend_width > 0 and blend_mode != "none":
             blend_region = (dist_from_center > core_radius) & (dist_from_center <= blend_outer_radius)
             
             normalized_dist = (dist_from_center[blend_region] - core_radius) / blend_width
@@ -193,8 +221,11 @@ class ImageMergeByPixelAlign(io.ComfyNode):
         patch_alpha_3ch = np.stack([patch_alpha] * 3, axis=2)
         
         print(f"[MiraSubPack:ImageMerge] Core radius: {core_radius:.1f} pixels")
-        print(f"[MiraSubPack:ImageMerge] Blend outer radius: {blend_outer_radius:.1f} pixels")
-        print(f"[MiraSubPack:ImageMerge] Blend mode: {blend_mode}, strength: {blend_strength}")
+        if blend_mode == "full_gradient":
+            print(f"[MiraSubPack:ImageMerge] Blend mode: {blend_mode} (core to edge), strength: {blend_strength}")
+        else:
+            print(f"[MiraSubPack:ImageMerge] Blend outer radius: {blend_outer_radius:.1f} pixels")
+            print(f"[MiraSubPack:ImageMerge] Blend mode: {blend_mode}, strength: {blend_strength}")
         print(f"[MiraSubPack:ImageMerge] Core pixels (alpha=1.0): {np.sum(patch_alpha > 0.99)}")
         print(f"[MiraSubPack:ImageMerge] Blend pixels (0<alpha<1): {np.sum((patch_alpha > 0.01) & (patch_alpha < 0.99))}")
         
