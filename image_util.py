@@ -14,16 +14,21 @@ class ImageMergeByPixelAlign(io.ComfyNode):
             inputs=[
                 io.Image.Input("base_img", optional=False),
                 io.Image.Input("patch_img", optional=False),
-                io.Int.Input("bg_color_r", default=255, min=0, max=255, step=1),
-                io.Int.Input("bg_color_g", default=0, min=0, max=255, step=1),
-                io.Int.Input("bg_color_b", default=255, min=0, max=255, step=1),
-                io.Int.Input("bg_tolerance", default=10, min=0, max=100, step=1),
-                io.Float.Input("core_coverage", default=0.6, min=0.0, max=1.0, step=0.05),
-                io.Int.Input("blend_width", default=30, min=0, max=200, step=5),
-                io.Float.Input("blend_strength", default=0.7, min=0.0, max=1.0, step=0.05),
-                io.Combo.Input("blend_mode", default="smooth", options=["smooth", "linear", "full_gradient", "none"]),
-                io.Int.Input("sift_features", default=5000, min=1000, max=10000, step=500),
-                io.Float.Input("match_ratio", default=0.7, min=0.5, max=0.9, step=0.05),
+                io.Int.Input("bg_color_r", default=255, min=0, max=255, step=1, tooltip="Background color Red component (0-255) to exclude from patch"),
+                io.Int.Input("bg_color_g", default=0, min=0, max=255, step=1, tooltip="Background color Green component (0-255) to exclude from patch"),
+                io.Int.Input("bg_color_b", default=255, min=0, max=255, step=1, tooltip="Background color Blue component (0-255) to exclude from patch"),
+                io.Int.Input("bg_tolerance", default=10, min=0, max=100, step=1, tooltip="Color distance tolerance for background detection"),
+                io.Float.Input("core_coverage", default=0.6, min=0.0, max=1.0, step=0.05, tooltip="Core region coverage ratio (0-1), where patch fully covers base"),
+                io.Int.Input("blend_width", default=30, min=0, max=200, step=5, tooltip="Width of blend transition in pixels from core edge"),
+                io.Float.Input("blend_strength", default=0.7, min=0.0, max=1.0, step=0.05, tooltip="Patch opacity in blend region (0=invisible, 1=fully opaque)"),
+                io.Combo.Input("blend_mode", default="smooth", options=["smooth", "linear", "full_gradient", "none"], 
+                                tooltip="Blend transition curve:\n"
+                                        "- 'smooth': sigmoid within blend_width\n"
+                                        "- 'linear': linear within blend_width\n"
+                                        "- 'full_gradient': gradient from core edge to patch edge\n"
+                                        "- 'none': no blend outside core"),
+                io.Int.Input("sift_features", default=5000, min=1000, max=10000, step=500, tooltip="Number of SIFT features to detect"),
+                io.Float.Input("match_ratio", default=0.7, min=0.5, max=0.9, step=0.05, tooltip="Lowe's ratio threshold for feature matching"),
             ],
             outputs=[
                 io.Image.Output(),
