@@ -69,7 +69,8 @@ class TextEncodeQwenImageEditPlusMod(io.ComfyNode):
                 io.Image.Input("image3", optional=True),
                 io.Image.Input("image4", optional=True),
                 io.Latent.Input("target_latent", optional=True),
-                io.Int.Input("image_size", default=512, optional=False, min=256, max=2048, step=8),
+                io.Combo.Input("crop_method", default="disabled", options=["disabled", "center"]),   
+                io.Int.Input("vl_image_size", default=512, optional=False, min=256, max=2048, step=8),
                 io.Combo.Input("reference_latents_method", default="none", options=["none", "offset", "index", "uxo/uno", "index_timestep_zero"]),   
                 io.Int.Input("reference_latents_size", default=1024, optional=True, min=256, max=4096, step=32),                
             ],
@@ -79,7 +80,7 @@ class TextEncodeQwenImageEditPlusMod(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, clip, system_prompt, prompt, vae=None, image1=None, image2=None, image3=None, image4=None, target_latent=None, image_size=512, reference_latents_size=1024, reference_latents_method="none") -> io.NodeOutput:
+    def execute(cls, clip, system_prompt, prompt, vae=None, image1=None, image2=None, image3=None, image4=None, target_latent=None, crop_method="disabled", vl_image_size=512, reference_latents_size=1024, reference_latents_method="none") -> io.NodeOutput:
         ref_latents = []
         images = [image1, image2, image3, image4]
         images_vl = []
@@ -89,13 +90,13 @@ class TextEncodeQwenImageEditPlusMod(io.ComfyNode):
         for i, image in enumerate(images):
             if image is not None:
                 samples = image.movedim(-1, 1)
-                total = int(image_size * image_size)
+                total = int(vl_image_size * vl_image_size)
 
                 scale_by = math.sqrt(total / (samples.shape[3] * samples.shape[2]))
                 width = round(samples.shape[3] * scale_by)
                 height = round(samples.shape[2] * scale_by)
 
-                s = comfy.utils.common_upscale(samples, width, height, "lanczos", "center")
+                s = comfy.utils.common_upscale(samples, width, height, "lanczos", crop_method)
                 images_vl.append(s.movedim(1, -1))
                 if vae is not None:
                     twidth = 0
@@ -113,7 +114,7 @@ class TextEncodeQwenImageEditPlusMod(io.ComfyNode):
                     if samples.shape[3] == twidth and samples.shape[2] == theight:
                         s = samples
                     else:
-                        s = comfy.utils.common_upscale(samples, twidth, theight, "lanczos", "center")
+                        s = comfy.utils.common_upscale(samples, twidth, theight, "lanczos", crop_method)
                     ref_latents.append(vae.encode(s.movedim(1, -1)[:, :, :, :3]))
 
                 image_prompt += "Picture {}: <|vision_start|><|image_pad|><|vision_end|>".format(i + 1)
