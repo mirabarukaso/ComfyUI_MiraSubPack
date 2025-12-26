@@ -70,7 +70,8 @@ class TextEncodeQwenImageEditPlusMod(io.ComfyNode):
                 io.Image.Input("image4", optional=True),
                 io.Latent.Input("target_latent", optional=True),
                 io.Int.Input("image_size", default=512, optional=False, min=256, max=2048, step=8),
-                io.Int.Input("ref_image_size", default=1024, optional=True, min=256, max=4096, step=32),
+                io.Combo.Input("reference_latents_method", default="none", options=["none", "offset", "index", "uxo/uno", "index_timestep_zero"]),   
+                io.Int.Input("reference_latents_size", default=1024, optional=True, min=256, max=4096, step=32),                
             ],
             outputs=[
                 io.Conditioning.Output(),
@@ -78,7 +79,7 @@ class TextEncodeQwenImageEditPlusMod(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, clip, system_prompt, prompt, vae=None, image1=None, image2=None, image3=None, image4=None, target_latent=None, image_size=512, ref_image_size=1024) -> io.NodeOutput:
+    def execute(cls, clip, system_prompt, prompt, vae=None, image1=None, image2=None, image3=None, image4=None, target_latent=None, image_size=512, reference_latents_size=1024, reference_latents_method="none") -> io.NodeOutput:
         ref_latents = []
         images = [image1, image2, image3, image4]
         images_vl = []
@@ -100,7 +101,7 @@ class TextEncodeQwenImageEditPlusMod(io.ComfyNode):
                     twidth = 0
                     theight = 0
                     if target_latent is None:                        
-                        total = int(ref_image_size * ref_image_size)
+                        total = int(reference_latents_size * reference_latents_size)
                         scale_by = math.sqrt(total / (samples.shape[3] * samples.shape[2]))
                         twidth = round(samples.shape[3] * scale_by / 32.0) * 32
                         theight = round(samples.shape[2] * scale_by / 32.0) * 32
@@ -121,6 +122,20 @@ class TextEncodeQwenImageEditPlusMod(io.ComfyNode):
         conditioning = clip.encode_from_tokens_scheduled(tokens)
         if len(ref_latents) > 0:
             conditioning = node_helpers.conditioning_set_values(conditioning, {"reference_latents": ref_latents}, append=True)
+
+        if reference_latents_method != "none":
+            '''
+            offset: Samples reference latents at (main timestep ± offset), making reference guidance move dynamically with the denoising progress.
+            index: Uses a fixed absolute timestep index to read reference latents, independent of the main generation step, giving stable, static influence.
+            uxo/uno: Injects reference in U-Net feature space instead of by timestep; uxo spreads influence deeper/stronger, uno keeps it lighter and closer to original U-Net layers.
+            index_timestep_zero: Always uses reference latents at timestep 0 (initial noise) as a prior/seed, shaping the global structure and noise distribution rather than guiding mid-denoise steps.
+            '''
+            
+            # refer https://github.com/comfyanonymous/ComfyUI/blob/d9a76cf66e3fc6b0047692a07bc1d24f20e16e20/comfy_extras/nodes_flux.py#L152
+            if "uxo" in reference_latents_method or "uso" in reference_latents_method:
+                reference_latents_method = "uxo"
+            
+            conditioning = node_helpers.conditioning_set_values(conditioning, {"reference_latents_method": reference_latents_method})
         return io.NodeOutput(conditioning)
 
 class QwenExtensionMod(ComfyExtension):
