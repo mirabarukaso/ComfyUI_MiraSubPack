@@ -80,7 +80,7 @@ class TextEncodeQwenImageEditPlusMod(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, clip, system_prompt, prompt, vae=None, image1=None, image2=None, image3=None, image4=None, target_latent=None, crop_method="disabled", vl_image_size=512, reference_latents_size=1024, reference_latents_method="none") -> io.NodeOutput:
+    def execute(cls, clip, system_prompt, prompt, vae=None, image1=None, image2=None, image3=None, image4=None, target_latent=None, crop_method="center", vl_image_size=512, reference_latents_size=1024, reference_latents_method="none") -> io.NodeOutput:
         ref_latents = []
         images = [image1, image2, image3, image4]
         images_vl = []
