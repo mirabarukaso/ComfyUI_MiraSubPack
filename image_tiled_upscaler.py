@@ -333,6 +333,7 @@ class AutoTiledKSamplerWithTagger:
                 "tagger_general_threshold": ("FLOAT", {"default": 0.55, "min": 0.0, "max": 1.0, "step": 0.05}),
                 "tagger_character_threshold": ("FLOAT", {"default": 0.6, "min": 0.0, "max": 1.0, "step": 0.05}),
                 "exclude_tags": ("STRING", {"default": ""}),
+                "session_method" : (['GPU', 'CPU'], ),
                 
                 # Sampler
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
@@ -355,7 +356,7 @@ class AutoTiledKSamplerWithTagger:
     DESCRIPTION = "Auto Tiled KSampler with CL Tagger assistance for large images."
 
     def sample(self, model, clip, image, samples, positive_text, negative_text, 
-               tagger_model, tagger_general_threshold, tagger_character_threshold, exclude_tags,
+               tagger_model, tagger_general_threshold, tagger_character_threshold, exclude_tags, session_method,
                seed, steps, cfg, sampler_name, scheduler, denoise, 
                tile_size, overlap):
         
@@ -399,7 +400,7 @@ class AutoTiledKSamplerWithTagger:
             
             dynamic_prompt = ""
             if mapping:                
-                tags_str = self.tagger.run_cl_tagger(tile_pil, full_model_path, full_tag_map_path, tagger_general_threshold, tagger_character_threshold, True, "general", exclude_tags, "GPU")
+                tags_str = self.tagger.run_cl_tagger(tile_pil, full_model_path, full_tag_map_path, tagger_general_threshold, tagger_character_threshold, True, "general", exclude_tags, session_method)
                 dynamic_prompt = tags_str
                 if positive_text != "":                
                     dynamic_prompt = f"{positive_text}, {tags_str}"
