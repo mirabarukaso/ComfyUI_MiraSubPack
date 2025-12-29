@@ -1,7 +1,7 @@
 from .JoyCaption.beta_one import JoyCaptionNodeBetaOne, JoyCaptionBetaOneSimpleNode
 from .QwenImage.nodes_qwen import TextEncodeQwenImageEditMod, TextEncodeQwenImageEditPlusMod 
 from .image_util import ImageMergeByPixelAlign
-from .image_tiled_upscaler import AutoTiledKSamplerWithTagger
+from .image_tiled_upscaler import ImageTiledKSamplerWithTagger, ImageTilesFeatherMerger
 
 def __init__(self):
     pass
@@ -15,7 +15,8 @@ NODE_CLASS_MAPPINGS = {
     
     "ImageMergeByPixelAlign_MiraSubPack": ImageMergeByPixelAlign,
     
-    "AutoTiledKSamplerWithTagger": AutoTiledKSamplerWithTagger
+    "ImageTiledKSamplerWithTagger": ImageTiledKSamplerWithTagger,
+    "ImageTilesFeatherMerger": ImageTilesFeatherMerger
 }    
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -27,7 +28,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     
     "ImageMergeByPixelAlign_MiraSubPack": "Image Merge By Pixel Align",
     
-    "AutoTiledKSamplerWithTagger": "Auto Tiled Sampler (with CL Tagger)"
+    "ImageTiledKSamplerWithTagger": "Image Tiled KSampler (with CL Tagger)",
+    "ImageTilesFeatherMerger": "Image Tiles Feather Merger"
+    
 }
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
