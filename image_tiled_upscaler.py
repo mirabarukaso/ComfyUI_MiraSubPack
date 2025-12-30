@@ -652,6 +652,7 @@ class ImageTilesFeatherMerger:
                 "tile_size": ("INT", {"default": 1280, "min": 512, "max": 4096, "step": 64}),
                 "overlap": ("INT", {"default": 64, "min": 64, "max": 256, "step": 64}),
                 "overlap_feather_rate": ("FLOAT", {"default": 1, "min": 0.1, "max": 4, "step": 0.1}),
+                "normalize": ("BOOLEAN", {"default": False}),
             },
         }
 
@@ -661,7 +662,7 @@ class ImageTilesFeatherMerger:
     CATEGORY = CAT
     DESCRIPTION = "Merge tiled image batch using OpenCV seamlessClone for natural feathered blending."
 
-    def merge(self, images, full_width, full_height, tile_size, overlap, overlap_feather_rate):
+    def merge(self, images, full_width, full_height, tile_size, overlap, overlap_feather_rate, normalize):
         device = images.device
         N, H, W, C = images.shape
 
@@ -772,7 +773,8 @@ class ImageTilesFeatherMerger:
                 tile_idx += 1
 
         # Normalize by weight map to avoid darkening
-        weight_map = weight_map.clamp(min=1e-5)
-        canvas /= weight_map
+        if normalize:            
+            weight_map = weight_map.clamp(min=1e-5)
+            canvas /= weight_map
 
         return (canvas.unsqueeze(0),)
