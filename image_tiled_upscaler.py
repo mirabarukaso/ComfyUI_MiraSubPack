@@ -253,6 +253,7 @@ class OverlappedLatentMerge:
         # col_x -> max_y_end
         col_last_y_end = {}
 
+        print(f"[MiraSubPack:OverlappedLatentMerge] Merging {len(tiles)} tiles for canvas {full_width}x{full_height}...")
         for idx, (x, y, w, h) in enumerate(tiles):
             # Extract current tile
             tile_latent = batch_latents[idx] # [C, H, W]
@@ -361,7 +362,7 @@ class OverlappedImageMerge:
         row_last_x_end = {}
         col_last_y_end = {}
 
-        print(f"[OverlappedImageMerge] Merging {len(tiles)} tiles...")
+        print(f"[MiraSubPack:OverlappedImageMerge] Merging {len(tiles)} tiles...")
 
         for idx, (x, y, w, h) in enumerate(tiles):
             if idx >= N: break
