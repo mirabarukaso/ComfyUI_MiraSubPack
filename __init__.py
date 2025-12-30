@@ -1,7 +1,7 @@
 from .JoyCaption.beta_one import JoyCaptionNodeBetaOne, JoyCaptionBetaOneSimpleNode
 from .QwenImage.nodes_qwen import TextEncodeQwenImageEditMod, TextEncodeQwenImageEditPlusMod 
 from .image_util import ImageMergeByPixelAlign
-from .image_tiled_upscaler import ImageTiledKSamplerWithTagger, OverlappedImageMerge, OverlappedLatentMerge, ImageCropTiles
+from .image_tiled_upscaler import ImageTiledKSamplerWithTagger, OverlappedImageMerge, OverlappedLatentMerge, ImageCropTiles, LatentUpscaleAndCropTiles
 
 def __init__(self):
     pass
@@ -15,10 +15,11 @@ NODE_CLASS_MAPPINGS = {
     
     "ImageMergeByPixelAlign_MiraSubPack": ImageMergeByPixelAlign,
     
-    "ImageTiledKSamplerWithTagger": ImageTiledKSamplerWithTagger,
-    "OverlappedImageMerge": OverlappedImageMerge,
-    "OverlappedLatentMerge": OverlappedLatentMerge,
-    "ImageCropTiles": ImageCropTiles
+    "ImageTiledKSamplerWithTagger_MiraSubPack": ImageTiledKSamplerWithTagger,
+    "OverlappedImageMerge_MiraSubPack": OverlappedImageMerge,
+    "OverlappedLatentMerge_MiraSubPack": OverlappedLatentMerge,
+    "ImageCropTiles_MiraSubPack": ImageCropTiles,
+    "LatentUpscaleAndCropTiles_MiraSubPack": LatentUpscaleAndCropTiles,
 }    
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -30,11 +31,11 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     
     "ImageMergeByPixelAlign_MiraSubPack": "Image Merge By Pixel Align",
     
-    "ImageTiledKSamplerWithTagger": "Image Tiled KSampler",
-    "OverlappedImageMerge": "Overlapped Image Merge",
-    "OverlappedLatentMerge": "Overlapped Latent Merge",
-    "ImageCropTiles": "Image Crop to Tiles",
-    
+    "ImageTiledKSamplerWithTagger_MiraSubPack": "Tiled Image KSampler with Tagger",
+    "OverlappedImageMerge_MiraSubPack": "Overlapped Image Merge",
+    "OverlappedLatentMerge_MiraSubPack": "Overlapped Latent Merge",
+    "ImageCropTiles_MiraSubPack": "Image Crop to Tiles",
+    "LatentUpscaleAndCropTiles_MiraSubPack": "Latent Upscale then Crop to Tiles",    
 }
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

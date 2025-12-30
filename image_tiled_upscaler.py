@@ -107,7 +107,61 @@ class TileHelper:
                     tiles.append((x, y, w, h))
                     
         return sorted(list(set(tiles)), key=lambda t: (t[1], t[0]))
-    
+
+    @staticmethod
+    def _find_optimal_tile_size(W, H, base_tile_size, overlap, max_deviation):
+        if base_tile_size <= overlap: 
+            aligned = (base_tile_size // 8) * 8
+            return aligned
+        
+        longer = max(W, H)
+        best_effective = base_tile_size
+        best_score = float('inf')
+        
+        for adj in range(-max_deviation, max_deviation + 1):
+            effective = base_tile_size + adj
+            if effective <= overlap: 
+                continue
+            
+            step = effective - overlap
+            if step <= 0: 
+                continue
+            
+            # Calculate number of tiles needed
+            n_long = math.ceil(longer / step)
+            
+            # Actual coverage: (number of tiles - 1) * step + effective
+            coverage = (n_long - 1) * step + effective
+            
+            # Extra pixels
+            extra = coverage - longer
+            
+            # Must fully cover, extra >= 0 is guaranteed
+            if extra < 0: 
+                continue
+            
+            score = extra + abs(adj) * 0.1
+            if score < best_score:
+                best_score = score
+                best_effective = effective
+        
+        # Ensure alignment to 8px
+        best_effective = (best_effective // 8) * 8
+        
+        # Check coverage again
+        step = best_effective - overlap
+        n_long = math.ceil(longer / step)
+        coverage = (n_long - 1) * step + best_effective
+        
+        # In case of insufficient coverage, align up to next multiple of 8
+        while coverage < longer:
+            best_effective += 8
+            step = best_effective - overlap
+            n_long = math.ceil(longer / step)
+            coverage = (n_long - 1) * step + best_effective
+        
+        return best_effective
+        
 # ==========================================
 # Ksampler with Tagger Support
 # ==========================================    
@@ -472,7 +526,7 @@ class ImageCropTiles(io.ComfyNode):
 
         effective_tile_size = tile_size
         if adaptable_tile_size:
-            effective_tile_size = cls._find_optimal_tile_size(W, H, tile_size, overlap, adaptable_max_deviation)
+            effective_tile_size = TileHelper._find_optimal_tile_size(W, H, tile_size, overlap, adaptable_max_deviation)
 
         tiles = TileHelper._calculate_tiles(W, H, effective_tile_size, overlap)
         
@@ -482,58 +536,176 @@ class ImageCropTiles(io.ComfyNode):
             tile_list.append(tile_img)
 
         cropped_tiles = torch.stack(tile_list, dim=0)
-        return io.NodeOutput(cropped_tiles, W, H, effective_tile_size, overlap, tile_size)
+        return io.NodeOutput(cropped_tiles, W, H, effective_tile_size, overlap, tile_size)    
     
-    @staticmethod
-    def _find_optimal_tile_size(W, H, base_tile_size, overlap, max_deviation):
-        if base_tile_size <= overlap: 
-            aligned = (base_tile_size // 8) * 8
-            return aligned
+# ==========================================
+# Latent Crop Utilities
+# ==========================================    
+class LatentUpscaleAndCropTiles(io.ComfyNode):
+    """
+    Advanced latent upscaler that outputs tiled latents for OverlappedLatentMerge.
+    Upscales input latent and splits it into overlapping tiles.
+    """
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LatentUpscaleAndCropTiles_MiraSubPack",
+            display_name="Latent Upscale then Crop to Tiles",
+            category=CAT,
+            description="Upscale latent and split into overlapping tiles for further processing.",
+            inputs=[
+                io.Latent.Input("latent", optional=False, tooltip="Input latent to upscale and tile."),
+                io.Float.Input("scale_factor", default=2.0, min=0.5, max=8.0, step=0.25,
+                              tooltip="Upscaling factor (e.g., 2.0 = double size)."),
+                io.Combo.Input("upscale_method", default="bicubic",
+                              options=["nearest", "bilinear", "bicubic", "area"],
+                              tooltip="Interpolation method for upscaling."),
+                io.Boolean.Input("multi_stage", default=True,
+                                tooltip="Use multi-stage upscaling for factors > 2.0 (smoother results)."),
+                io.Float.Input("noise_strength", default=0.0, min=0.0, max=1.0, step=0.01,
+                              tooltip="Add noise to upscaled latent (helps with detail generation)."),
+                io.Int.Input("seed", default=0, min=0, max=0xffffffffffffffff,
+                            tooltip="Seed for noise generation."),
+                io.Int.Input("tile_size", default=1024, min=512, max=4096, step=64,
+                            tooltip="Size of each tile in pixels (will be converted to latent space)."),
+                io.Int.Input("overlap", default=64, min=64, max=256, step=64,
+                            tooltip="Overlap between tiles in pixels."),
+                io.Boolean.Input("adaptable_tile_size", default=True),
+                io.Int.Input("adaptable_max_deviation", default=256, min=64, max=1024, step=64),
+            ],
+            outputs=[
+                io.Latent.Output(display_name="tiled_latents"),
+                io.Int.Output(display_name="full_width"),
+                io.Int.Output(display_name="full_height"),
+                io.Int.Output(display_name="effective_tile_size"),
+                io.Int.Output(display_name="overlap"),
+                io.Int.Output(display_name="original_tile_size"),
+                io.Int.Output(display_name="original_width"),
+                io.Int.Output(display_name="original_height"),
+            ],
+            is_output_node=True
+        )
+    
+    @classmethod
+    def execute(cls, latent, scale_factor, upscale_method, multi_stage, 
+                noise_strength, seed, tile_size, overlap, adaptable_tile_size, adaptable_max_deviation) -> io.NodeOutput:
+        """
+        Upscale latent and split into tiles for OverlappedLatentMerge.
         
-        longer = max(W, H)
-        best_effective = base_tile_size
-        best_score = float('inf')
+        Returns tiled latents in batch format [N, C, H, W] where N is number of tiles.
+        """
+        samples = latent["samples"]
+        B, C, latent_h, latent_w = samples.shape
         
-        for adj in range(-max_deviation, max_deviation + 1):
-            effective = base_tile_size + adj
-            if effective <= overlap: 
-                continue
-            
-            step = effective - overlap
-            if step <= 0: 
-                continue
-            
-            # Calculate number of tiles needed
-            n_long = math.ceil(longer / step)
-            
-            # Actual coverage: (number of tiles - 1) * step + effective
-            coverage = (n_long - 1) * step + effective
-            
-            # Extra pixels
-            extra = coverage - longer
-            
-            # Must fully cover, extra >= 0 is guaranteed
-            if extra < 0: 
-                continue
-            
-            score = extra + abs(adj) * 0.1
-            if score < best_score:
-                best_score = score
-                best_effective = effective
+        # Original dimensions in pixel space
+        orig_width = latent_w * 8
+        orig_height = latent_h * 8
         
-        # Ensure alignment to 8px
-        best_effective = (best_effective // 8) * 8
+        # Calculate target dimensions
+        new_width = int(orig_width * scale_factor)
+        new_height = int(orig_height * scale_factor)
         
-        # Check coverage again
-        step = best_effective - overlap
-        n_long = math.ceil(longer / step)
-        coverage = (n_long - 1) * step + best_effective
+        # Align to 8px
+        new_width = (new_width // 8) * 8
+        new_height = (new_height // 8) * 8
+        new_width = max(8, new_width)
+        new_height = max(8, new_height)
         
-        # In case of insufficient coverage, align up to next multiple of 8
-        while coverage < longer:
-            best_effective += 8
-            step = best_effective - overlap
-            n_long = math.ceil(longer / step)
-            coverage = (n_long - 1) * step + best_effective
+        new_latent_w = new_width // 8
+        new_latent_h = new_height // 8
         
-        return best_effective
+        print("[MiraSubPack:LatentUpscalerAdvanced] Upscaling latent:")
+        print(f"  Original: {orig_width}x{orig_height} ({latent_w}x{latent_h} latent)")
+        print(f"  Target: {new_width}x{new_height} ({new_latent_w}x{new_latent_h} latent)")
+        print(f"  Scale: {scale_factor:.3f}x")
+        print(f"  Method: {upscale_method}")
+        
+        # Perform upscaling
+        current_samples = samples
+        
+        if multi_stage and scale_factor > 2.0:
+            # Multi-stage upscaling
+            stages = []
+            remaining_scale = scale_factor
+            
+            while remaining_scale > 2.0:
+                stages.append(2.0)
+                remaining_scale /= 2.0
+            
+            if remaining_scale > 1.0:
+                stages.append(remaining_scale)
+            
+            print(f"  Multi-stage: {len(stages)} stages {stages}")
+            
+            for i, stage_scale in enumerate(stages):
+                current_h = current_samples.shape[2]
+                current_w = current_samples.shape[3]
+                stage_h = int(current_h * stage_scale)
+                stage_w = int(current_w * stage_scale)
+                
+                current_samples = torch.nn.functional.interpolate(
+                    current_samples,
+                    size=(stage_h, stage_w),
+                    mode=upscale_method,
+                    align_corners=False if upscale_method in ["bilinear", "bicubic"] else None
+                )
+                
+                print(f"    Stage {i+1}: {current_h}x{current_w} -> {stage_h}x{stage_w}")
+        else:
+            # Single-stage upscaling
+            current_samples = torch.nn.functional.interpolate(
+                current_samples,
+                size=(new_latent_h, new_latent_w),
+                mode=upscale_method,
+                align_corners=False if upscale_method in ["bilinear", "bicubic"] else None
+            )
+        
+        # Add noise if requested
+        if noise_strength > 0:
+            noise = torch.randn(current_samples.shape, dtype=current_samples.dtype, device=current_samples.device, generator=torch.manual_seed(seed))
+            current_samples = current_samples + noise * noise_strength
+            print(f"  Added noise: strength={noise_strength:.3f}, seed={seed}")
+        
+        # Now split the upscaled latent into tiles
+        upscaled_latent = current_samples[0]  # [C, H, W]
+        
+        effective_tile_size = tile_size
+        if adaptable_tile_size:
+            effective_tile_size = TileHelper._find_optimal_tile_size(new_width, new_height, tile_size, overlap, adaptable_max_deviation)
+        
+        # Calculate tile positions in pixel space
+        tiles = TileHelper._calculate_tiles(new_width, new_height, effective_tile_size, overlap)
+        
+        print(f"[MiraSubPack:LatentUpscalerAdvanced] Splitting into {len(tiles)} tiles:")
+        print(f"  Tile size: {effective_tile_size}px, Overlap: {overlap}px")
+        
+        # Crop tiles from upscaled latent
+        tile_list = []
+        for idx, (x, y, w, h) in enumerate(tiles):
+            # Convert to latent space coordinates
+            lx, ly = x // 8, y // 8
+            lw, lh = w // 8, h // 8
+            
+            # Crop tile from upscaled latent
+            tile_latent = upscaled_latent[:, ly:ly+lh, lx:lx+lw].clone()
+            tile_list.append(tile_latent)
+            
+            print(f"  Tile {idx+1}: position=({x},{y}) size={w}x{h} latent_size={lw}x{lh}")
+        
+        # Stack tiles into batch format [N, C, H, W]
+        tiled_latents = torch.stack(tile_list, dim=0)
+        
+        print("[MiraSubPack:LatentUpscalerAdvanced] Output:")
+        print(f"  Tiled latents shape: {tiled_latents.shape}")
+        print(f"  Ready for OverlappedLatentMerge with full_size={new_width}x{new_height}")
+        
+        return io.NodeOutput(
+            {"samples": tiled_latents},  # Format compatible with OverlappedLatentMerge
+            new_width,
+            new_height,
+            effective_tile_size,
+            overlap,
+            tile_size,
+            orig_width,
+            orig_height
+        )
