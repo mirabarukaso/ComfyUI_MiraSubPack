@@ -296,7 +296,7 @@ class ImageTiledKSamplerWithTagger:
                 
                 # Tagger parameters
                 "tagger_model": (onnx_list,),
-                "tagger_general_threshold": ("FLOAT", {"default": 0.65, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "tagger_general_threshold": ("FLOAT", {"default": 0.55, "min": 0.0, "max": 1.0, "step": 0.05}),
                 "tagger_exclude_tags": ("STRING", {"default": ""}),
                 "tagger_session_method": (['GPU', 'CPU'], ),
                 
@@ -309,8 +309,9 @@ class ImageTiledKSamplerWithTagger:
                 "denoise": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 1.0, "step": 0.01}),
                 
                 # Tiling parameters
-                "tile_size": ("INT", {"default": 1024, "min": 512, "max": 2048, "step": 64}),
-                "overlap": ("INT", {"default": 128, "min": 0, "max": 256, "step": 8}),
+                "tile_size": ("INT", {"default": 1280, "min": 512, "max": 2048, "step": 64}),
+                "overlap": ("INT", {"default": 64, "min": 64, "max": 256, "step": 64}),
+                "overlap_feather_rate": ("FLOAT", {"default": 1, "min": 0.1, "max": 4, "step": 0.1}),
             }
         }
 
@@ -323,7 +324,7 @@ class ImageTiledKSamplerWithTagger:
     def sample(self, model, clip, image, samples, positive_text, negative_text, 
                tagger_model, tagger_general_threshold, tagger_exclude_tags, tagger_session_method,
                seed, steps, cfg, sampler_name, scheduler, denoise, 
-               tile_size, overlap):
+               tile_size, overlap, overlap_feather_rate):
         
         latent_image = samples["samples"]
         _, _, latent_h, latent_w = latent_image.shape
@@ -391,17 +392,23 @@ class ImageTiledKSamplerWithTagger:
             )            
             sampled_tiles.append((x, y, w, h, sampled_tile["samples"]))
             
+        # Calculate actual feather width
+        feather_width = max(overlap * 4, int(overlap * overlap_feather_rate))
+        feather_width = min(tile_size * 0.25, feather_width) 
+        feather_width = (feather_width // 8) * 8
+        
         # Phase 2: Merge all sampled tiles with enhanced blending
         tile_latents = None
+        placed_tiles = []  # Track placed tiles: [(x, y, x_end, y_end), ...]
+        
         for x, y, w, h, tile_latent in sampled_tiles:
             print(f"  > Merging Tile at ({x},{y}) {w}x{h}")
             output_latent = self._place_tile_enhanced(
                 output_latent, tile_latent, 
-                original_latent, x, y, w, h, overlap
+                original_latent, x, y, w, h, overlap, feather_width, placed_tiles
             )
-            # Convert sampled_tiles to ComfyUI LATENT format
-            tile_latents = torch.cat([tile_latents, tile_latent], dim=0) if tile_latents is not None else tile_latent                
-            
+            tile_latents = torch.cat([tile_latents, tile_latent], dim=0) if tile_latents is not None else tile_latent
+        
         return ({"samples": output_latent}, {"samples": tile_latents}, "\n".join(log_info), pixel_w, pixel_h, tile_size, overlap)
     
     def _calculate_tiles(self, width, height, tile_size, overlap):
@@ -451,22 +458,73 @@ class ImageTiledKSamplerWithTagger:
         return {"samples": cropped}
         
     def _place_tile_enhanced(self, output, tile, original_latent, 
-                            x, y, width, height, overlap):
+                    x, y, width, height, overlap, feather_width, placed_tiles):
         """
         Enhanced tile merging with three-level consistency:
         1. Global light color alignment (30% strength)
         2. Strong overlap region calibration (80% strength)
         3. Feathered blending for smooth edges
+        
+        Handles excessive overlap by cropping tiles appropriately.
+        overlap: Full overlap width used for sampling (provides context)
+        feather_width: Actual feather width for blending (smaller = sharper)
+        placed_tiles: List tracking previously placed tile bounds [(x, y, x_end, y_end), ...]
         """
         lx, ly, lw, lh = x//8, y//8, width//8, height//8
-        l_overlap = overlap // 8
+        l_overlap = overlap // 8  # Used for excessive overlap detection
+        l_feather = feather_width // 8  # Smaller feather width in latent space
         batch, channels, tile_h, tile_w = tile.shape
+        
+        # Original latent space coordinates
+        original_lx, original_ly = lx, ly
+        
+        # Detect and handle excessive overlap by checking all previously placed tiles
+        crop_top = 0
+        crop_left = 0
+        
+        for prev_x, prev_y, prev_x_end, prev_y_end in placed_tiles:
+            prev_lx, prev_ly = prev_x // 8, prev_y // 8
+            prev_lx_end, prev_ly_end = prev_x_end // 8, prev_y_end // 8
+            
+            # Check vertical overlap (same column)
+            if abs(prev_lx - lx) < lw // 2 and prev_ly < ly < prev_ly_end:
+                actual_overlap_y = prev_ly_end - ly
+                if actual_overlap_y > l_overlap * 2:
+                    excess = actual_overlap_y - l_overlap
+                    crop_top = max(crop_top, excess)
+                    ly = original_ly + crop_top
+            
+            # Check horizontal overlap (same row)
+            if abs(prev_ly - ly) < lh // 2 and prev_lx < lx < prev_lx_end:
+                actual_overlap_x = prev_lx_end - lx
+                if actual_overlap_x > l_overlap * 2:
+                    excess = actual_overlap_x - l_overlap
+                    crop_left = max(crop_left, excess)
+                    lx = original_lx + crop_left
+        
+        # Crop tile if needed
+        if crop_top > 0 or crop_left > 0:
+            tile = tile[:, :, crop_top:, crop_left:].clone()
+            tile_h = tile.shape[2]
+            tile_w = tile.shape[3]
+            print(f"    [Crop] Excessive overlap detected, cropped tile by (top={crop_top}, left={crop_left})")
+        
+        # Final boundary check
+        if ly + tile_h > output.shape[2]:
+            tile_h = output.shape[2] - ly
+            tile = tile[:, :, :tile_h, :]
+        if lx + tile_w > output.shape[3]:
+            tile_w = output.shape[3] - lx
+            tile = tile[:, :, :, :tile_w]
+        
+        if tile_h <= 0 or tile_w <= 0:
+            return output
         
         original_tile = original_latent[:, :, ly:ly+tile_h, lx:lx+tile_w]
         
         if original_tile.shape[2:] != tile.shape[2:]:
             print("  [Warning] Tile size mismatch during merge; falling back to basic blending.")
-            return self._place_tile_basic(output, tile, x, y, width, height, overlap)
+            return self._place_tile_basic(output, tile, lx*8, ly*8, width, height, feather_width)
         
         tile_corrected = tile.clone()
         
@@ -482,8 +540,9 @@ class ImageTiledKSamplerWithTagger:
             tile_corrected[:, c:c+1, :, :] = tile_c * 0.7 + corrected * 0.3
         
         # Level 2: Strong overlap calibration (80%)
-        if l_overlap > 0:
-            overlap_mask = self._create_overlap_mask(tile_h, tile_w, lx, ly, l_overlap, output.shape, tile.device)
+        # Use smaller feather region for calibration to avoid over-blending
+        if l_feather > 0:
+            overlap_mask = self._create_overlap_mask(tile_h, tile_w, lx, ly, l_feather, output.shape, tile.device)
             
             overlap_pixels = overlap_mask.sum()
             if overlap_pixels > 10:
@@ -501,18 +560,16 @@ class ImageTiledKSamplerWithTagger:
                     corrected = (tile_c - tile_mean) * (orig_std / tile_std) + orig_mean
                     tile_corrected[:, c:c+1, :, :] = tile_c * (1 - mask_c * 0.8) + corrected * mask_c * 0.8
         
-        # Level 3: Feathered blending
-        blend_mask = self._create_feather_mask(tile_h, tile_w, lx, ly, l_overlap, output.shape, tile.device)
+        # Level 3: Feathered blending with smaller feather width
+        blend_mask = self._create_feather_mask(tile_h, tile_w, lx, ly, l_feather, output.shape, tile.device)
         
-        target_h, target_w = output[:, :, ly:ly+tile_h, lx:lx+tile_w].shape[2:]
-        if target_h != tile_h or target_w != tile_w:
-            tile_corrected = tile_corrected[:, :, :target_h, :target_w]
-            blend_mask = blend_mask[:, :, :target_h, :target_w]
-        
-        output[:, :, ly:ly+target_h, lx:lx+target_w] = (
+        output[:, :, ly:ly+tile_h, lx:lx+tile_w] = (
             tile_corrected * blend_mask + 
-            output[:, :, ly:ly+target_h, lx:lx+target_w] * (1 - blend_mask)
+            output[:, :, ly:ly+tile_h, lx:lx+tile_w] * (1 - blend_mask)
         )
+        
+        # Record this tile's final position for future overlap detection
+        placed_tiles.append((lx * 8, ly * 8, (lx + tile_w) * 8, (ly + tile_h) * 8))
         
         return output
     
@@ -592,8 +649,9 @@ class ImageTilesFeatherMerger:
                 "images": ("IMAGE",),  # Batch of tiles: [N, H, W, 3] or [N, H, W, 4]
                 "full_width": ("INT", {"default": 0, "min": 0, "max": 16384, "step": 8, "tooltip": "Full image width."}),
                 "full_height": ("INT", {"default": 0, "min": 0, "max": 16384, "step": 8, "tooltip": "Full image height."}),
-                "tile_size": ("INT", {"default": 1024, "min": 128, "max": 4096, "step": 64}),
-                "overlap": ("INT", {"default": 128, "min": 0, "max": 512, "step": 8}),
+                "tile_size": ("INT", {"default": 1280, "min": 512, "max": 4096, "step": 64}),
+                "overlap": ("INT", {"default": 64, "min": 64, "max": 256, "step": 64}),
+                "overlap_feather_rate": ("FLOAT", {"default": 1, "min": 0.1, "max": 4, "step": 0.1}),
             },
         }
 
@@ -603,7 +661,7 @@ class ImageTilesFeatherMerger:
     CATEGORY = CAT
     DESCRIPTION = "Merge tiled image batch using OpenCV seamlessClone for natural feathered blending."
 
-    def merge(self, images, full_width, full_height, tile_size, overlap):
+    def merge(self, images, full_width, full_height, tile_size, overlap, overlap_feather_rate):
         device = images.device
         N, H, W, C = images.shape
 
@@ -614,7 +672,10 @@ class ImageTilesFeatherMerger:
         canvas = torch.zeros((full_height, full_width, 3), device=device, dtype=torch.float32)
         weight_map = torch.zeros((full_height, full_width, 3), device=device, dtype=torch.float32)
 
-        feather = overlap
+        # Calculate actual feather width based on overlap_feather_rate
+        feather = max(overlap * 4, int(overlap * overlap_feather_rate))
+        feather = min(tile_size * 0.25, feather)
+        
         ramp = torch.linspace(0, 1, feather, device=device, dtype=torch.float32)
         ramp_rev = ramp.flip(0)
 
@@ -640,22 +701,72 @@ class ImageTilesFeatherMerger:
                 x_end = x + actual_w
                 y_end = y + actual_h
 
-                # Create feathering mask
+                # Check for excessive overlap and crop tile if necessary
+                crop_top = 0
+                crop_left = 0
+                
+                if r > 0:
+                    prev_y = (r - 1) * step
+                    prev_y = min(prev_y, full_height - tile_size)
+                    prev_y = max(0, prev_y)
+                    prev_y_end = prev_y + tile_size
+                    
+                    actual_overlap_y = prev_y_end - y
+                    if actual_overlap_y > overlap * 2:
+                        excess = actual_overlap_y - overlap
+                        crop_top = excess
+                        y += excess
+                        y_end = y + (actual_h - crop_top)
+                
+                if c > 0:
+                    prev_x = (c - 1) * step
+                    prev_x = min(prev_x, full_width - tile_size)
+                    prev_x = max(0, prev_x)
+                    prev_x_end = prev_x + tile_size
+                    
+                    actual_overlap_x = prev_x_end - x
+                    if actual_overlap_x > overlap * 2:
+                        excess = actual_overlap_x - overlap
+                        crop_left = excess
+                        x += excess
+                        x_end = x + (actual_w - crop_left)
+
+                # Crop tile if needed
+                tile_cropped = tile[crop_top:, crop_left:].clone()
+                crop_h, crop_w = tile_cropped.shape[:2]
+                
+                # Ensure tile fits within canvas boundaries
+                if x_end > full_width:
+                    crop_w = full_width - x
+                    tile_cropped = tile_cropped[:, :crop_w]
+                    x_end = full_width
+                
+                if y_end > full_height:
+                    crop_h = full_height - y
+                    tile_cropped = tile_cropped[:crop_h, :]
+                    y_end = full_height
+
+                actual_h, actual_w = tile_cropped.shape[:2]
+                if actual_h <= 0 or actual_w <= 0:
+                    tile_idx += 1
+                    continue
+
+                # Create feathering mask with dynamic feather width
                 mask = torch.ones((actual_h, actual_w), device=device, dtype=torch.float32)
-                if y > 0:
+                if y > 0 and feather > 0:
                     mask[:feather, :] *= ramp[:min(feather, actual_h), None]
-                if y_end < full_height:
+                if y_end < full_height and feather > 0:
                     mask[-feather:, :] *= ramp_rev[:min(feather, actual_h), None]
-                if x > 0:
+                if x > 0 and feather > 0:
                     mask[:, :feather] *= ramp[None, :min(feather, actual_w)]
-                if x_end < full_width:
+                if x_end < full_width and feather > 0:
                     mask[:, -feather:] *= ramp_rev[None, :min(feather, actual_w)]
 
                 mask = mask[..., None]
                 mask3 = mask.expand(-1, -1, 3)
 
                 # Tile blending with feathered mask
-                canvas[y:y_end, x:x_end] += tile[:actual_h, :actual_w] * mask3
+                canvas[y:y_end, x:x_end] += tile_cropped[:actual_h, :actual_w] * mask3
                 weight_map[y:y_end, x:x_end] += mask3
 
                 tile_idx += 1
