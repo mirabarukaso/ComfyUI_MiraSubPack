@@ -12,6 +12,7 @@ class ImageMergeByPixelAlign(io.ComfyNode):
             node_id="ImageMergeByPixelAlign_MiraSubPack",
             display_name="Image Merge By Pixel Align",
             category=CAT,
+            description="Merge patch image onto base using pixel alignment with center-based coverage blending.",
             inputs=[
                 io.Image.Input("base_img", optional=False),
                 io.Image.Input("patch_img", optional=False),

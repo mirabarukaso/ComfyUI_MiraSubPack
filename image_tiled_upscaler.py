@@ -3,6 +3,7 @@ import math
 import comfy.sample
 import comfy.samplers
 import latent_preview
+from comfy_api.latest import io
 
 CAT = "Mira/SubPack"
 
@@ -65,79 +66,9 @@ class FeatherBlendHelper:
         
         return mask
 
-# ==========================================
-# Ksampler with Tagger Support
-# ==========================================    
-class ImageTiledKSamplerWithTagger:
-    """
-    Ksampler with Tagger Support for Tiled Image Sampling
-    """
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "model": ("MODEL",),
-                "clip": ("CLIP",),  
-                "samples": ("LATENT",),
-                "common_positive": ("STRING", {"multiline": True, "default": ""}),
-                "common_negative": ("STRING", {"multiline": True, "default": "bad quality, worst quality, worst detail, sketch"}),
-                "tagger_text": ("STRING", {"multiline": True, "default": ""}),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
-                "steps": ("INT", {"default": 16, "min": 1, "max": 100}),
-                "cfg": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 32.0, "step": 0.1}),
-                "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
-                "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
-                "denoise": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "full_width": ("INT", {"default": 0, "min": 0, "max": 65536, "step": 8, "tooltip": "Full image width."}),
-                "full_height": ("INT", {"default": 0, "min": 0, "max": 65536, "step": 8, "tooltip": "Full image height."}),
-                "tile_size": ("INT", {"default": 1280, "min": 512, "max": 2048, "step": 64}),
-                "overlap": ("INT", {"default": 64, "min": 64, "max": 256, "step": 64}),                
-            }
-        }
-
-    RETURN_TYPES = ("LATENT", "INT", "INT", "INT", "INT")
-    RETURN_NAMES = ("tiled_latents", "full_width", "full_height", "tile_size", "overlap")
-    FUNCTION = "sample"
-    CATEGORY = CAT
-    DESCRIPTION = "Image tiled KSampler with Tagger assistance for large images hi-res fix."
-
-    def sample(self, model, clip, samples, common_positive, common_negative, tagger_text,               
-               seed, steps, cfg, sampler_name, scheduler, denoise, 
-               full_width, full_height, tile_size, overlap):
-        mapping = tagger_text.splitlines()
-        
-        # Recalculate tiles using strict grid logic
-        tiles = self._calculate_tiles(full_width, full_height, tile_size, overlap)
-        print(f"[MiraSubPack:AutoTiledTagger] Using {len(tiles)} tiles.")
-        
-        negative_tokens = clip.tokenize(common_negative)
-        negative_conditioning = clip.encode_from_tokens_scheduled(negative_tokens)
-
-        tile_latents = None
-        for idx, (x, y, w, h) in enumerate(tiles):
-            # Dynamic prompt construction
-            dynamic_prompt = common_positive
-            tags_str = ""
-            if idx < len(mapping):
-                tags_str = mapping[idx].replace('(', '\(').replace(')', '\)')
-                dynamic_prompt = f"{common_positive}, {tags_str}" if common_positive else tags_str
-            
-            print(f"  > Sampling Tile {idx+1}/{len(tiles)}: ({x},{y}) {w}x{h} | Tags len: {len(tags_str)}")
-            print(f"    Tags: {tags_str}")
-            positive_tokens = clip.tokenize(dynamic_prompt)
-            positive_conditioning = clip.encode_from_tokens_scheduled(positive_tokens)
-            
-            tile_latent = self._crop_latent(samples, x, y, w, h)
-            
-            sampled_tile = self._sample_single(
-                model, positive_conditioning, negative_conditioning, tile_latent,
-                seed, steps, cfg, sampler_name, scheduler, denoise
-            )            
-            tile_latents = torch.cat([tile_latents, sampled_tile["samples"]], dim=0) if tile_latents is not None else sampled_tile["samples"]
-                    
-        return ({"samples": tile_latents}, full_width, full_height, tile_size, overlap)
-    
-    def _calculate_tiles(self, width, height, tile_size, overlap):
+class TileHelper:
+    @staticmethod
+    def _calculate_tiles(width, height, tile_size, overlap):
         """Standard grid calculation."""
         tiles = []
         step_x = tile_size - overlap
@@ -176,8 +107,85 @@ class ImageTiledKSamplerWithTagger:
                     tiles.append((x, y, w, h))
                     
         return sorted(list(set(tiles)), key=lambda t: (t[1], t[0]))
+    
+# ==========================================
+# Ksampler with Tagger Support
+# ==========================================    
+class ImageTiledKSamplerWithTagger(io.ComfyNode):
+    """
+    Ksampler with Tagger Support for Tiled Image Sampling
+    """    
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="ImageTiledKSamplerWithTagger_MiraSubPack",
+            display_name="Tiled Image KSampler with Tagger",
+            category=CAT,
+            description="Perform tiled image sampling with dynamic tagger-based prompts for each tile.",
+            inputs=[
+                io.Model.Input("model"),
+                io.Clip.Input("clip"),
+                io.Latent.Input("tiled_samples", tooltip="Tiled latents input from VAE."),
+                io.String.Input("common_positive", default="", multiline=True, tooltip="Common positive prompt for all tiles."),
+                io.String.Input("common_negative", default="bad quality, worst quality, worst detail, sketch", multiline=True, tooltip="Common negative prompt for all tiles."),
+                io.String.Input("tagger_text", default="", multiline=True, tooltip="Tagger output text mapping for tiles, one line per tile."),
+                io.Int.Input("seed", default=0, min=0, max=0xffffffffffffffff),
+                io.Int.Input("steps", default=16, min=1, max=100), 
+                io.Float.Input("cfg", default=7.0, min=0.0, max=32.0, step=0.1),
+                io.Combo.Input("sampler_name", default="euler_ancestral", options=comfy.samplers.KSampler.SAMPLERS),
+                io.Combo.Input("scheduler", default="beta", options=comfy.samplers.KSampler.SCHEDULERS),
+                io.Float.Input("denoise", default=0.35, min=0.0, max=1.0, step=0.01),
+                
+                #io.Int.Input("full_width", default=0, min=0, max=65536, step=8, tooltip="Full image width."),
+                #io.Int.Input("full_height", default=0, min=0, max=65536, step=8, tooltip="Full image height."),
+                #io.Int.Input("tile_size", default=1280, min=512, max=2048, step=64),
+                #io.Int.Input("overlap", default=64, min=64, max=256, step=64),
+            ],
+            outputs=[
+                io.Latent.Output(display_name="tiled_latents"),
+            ],
+        )
+    
+    @classmethod
+    def execute(cls, model, clip, tiled_samples, common_positive, common_negative, tagger_text,
+               seed, steps, cfg, sampler_name, scheduler, denoise 
+               #full_width, full_height, tile_size, overlap
+               ) -> io.NodeOutput:                                
+        negative_tokens = clip.tokenize(common_negative)
+        negative_conditioning = clip.encode_from_tokens_scheduled(negative_tokens)
 
-    def _crop_latent(self, samples, x, y, width, height):
+        batch_latents = tiled_samples["samples"]
+        print(f"[MiraSubPack:AutoTiledTagger] Using {len(batch_latents)} tiles.")
+        
+        # Parse tagger text mapping
+        mapping = tagger_text.splitlines()
+        tile_latents = None
+        for idx in range(len(batch_latents)):
+            # Dynamic prompt construction
+            dynamic_prompt = common_positive
+            tags_str = ""
+            if idx < len(mapping):
+                tags_str = mapping[idx].replace('(', r'\(').replace(')', r'\)')
+                dynamic_prompt = f"{common_positive}, {tags_str}" if common_positive else tags_str
+            
+            single_latent = batch_latents[idx].unsqueeze(0)  # [C, H, W] -> [1, C, H, W]
+            
+            print(f"  > Sampling Tile {idx+1}/{len(batch_latents)}: {single_latent.shape[3]*8}x{single_latent.shape[2]*8}")
+            print(f"    Tags: {tags_str}")
+            positive_tokens = clip.tokenize(dynamic_prompt)
+            positive_conditioning = clip.encode_from_tokens_scheduled(positive_tokens)
+            
+            print(f"    Tile latent shape: {single_latent.shape}")
+            sampled_tile = cls._sample_single(
+                model, positive_conditioning, negative_conditioning, {"samples": single_latent},
+                seed, steps, cfg, sampler_name, scheduler, denoise
+            )            
+            tile_latents = torch.cat([tile_latents, sampled_tile["samples"]], dim=0) if tile_latents is not None else sampled_tile["samples"]
+                    
+        return io.NodeOutput({"samples": tile_latents})
+    
+    @staticmethod
+    def _crop_latent(samples, x, y, width, height):
         latent = samples["samples"]
         lx, ly, lw, lh = x//8, y//8, width//8, height//8
         cropped = latent[:, :, ly:ly+lh, lx:lx+lw].clone()
@@ -189,7 +197,8 @@ class ImageTiledKSamplerWithTagger:
              cropped = torch.nn.functional.pad(cropped, (0, max(0, pad_w), 0, max(0, pad_h)), mode='replicate')
         return {"samples": cropped}        
             
-    def _sample_single(self, model, positive, negative, latent, seed, steps, cfg, sampler_name, scheduler, denoise):
+    @staticmethod
+    def _sample_single(model, positive, negative, latent, seed, steps, cfg, sampler_name, scheduler, denoise):
         l = latent["samples"]
         noise = torch.randn(l.shape, dtype=l.dtype, device=l.device, generator=torch.manual_seed(seed))
         callback = latent_preview.prepare_callback(model, steps)
@@ -201,38 +210,39 @@ class ImageTiledKSamplerWithTagger:
 # ==========================================
 # Latent Merging Utilities
 # ==========================================
-class OverlappedLatentMerge:
+class OverlappedLatentMerge(io.ComfyNode):
     """
     Merge overlapped latent tiles.
     Uses geometric feathering and weighting boost for large overlaps.
-    """
+    """    
     @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "tiled_latents": ("LATENT",),
-                "full_width": ("INT", {"default": 0, "min": 0, "max": 65536, "step": 8}),
-                "full_height": ("INT", {"default": 0, "min": 0, "max": 65536, "step": 8}),
-                "tile_size": ("INT", {"default": 1024, "min": 512, "max": 4096, "step": 64}),
-                "overlap": ("INT", {"default": 64, "min": 64, "max": 256, "step": 64}),
-                "overlap_feather_rate": ("FLOAT", {"default": 1, "min": 0.1, "max": 4, "step": 0.1}),
-            },
-        }
+    def define_schema(cls):
+        return io.Schema(
+            node_id="OverlappedLatentMerge_MiraSubPack",
+            display_name="Overlapped Latent Merge",
+            category=CAT,
+            description="Merge overlapped latent tiles using geometric feathering and overlap priority.",
+            inputs=[
+                io.Latent.Input("tiled_latents", optional=False, tooltip="Tiled latents input."),
+                io.Int.Input("full_width", default=0, min=0, max=65536, step=8, tooltip="Full image width."),
+                io.Int.Input("full_height", default=0, min=0, max=65536, step=8, tooltip="Full image height."),
+                io.Int.Input("tile_size", default=1024, min=512, max=4096, step=64),
+                io.Int.Input("overlap", default=64, min=64, max=256, step=64),
+                io.Float.Input("overlap_feather_rate", default=1.0, min=0.1, max=4.0, step=0.1, tooltip="Feathering rate multiplier."),
+            ],
+            outputs=[
+                io.Latent.Output()
+            ],
+        )
 
-    RETURN_TYPES = ("LATENT",)
-    RETURN_NAMES = ("latent",)
-    FUNCTION = "merge"
-    CATEGORY = CAT
-    DESCRIPTION = "Merge overlapped latent tiles with corrected blending."
-
-    def merge(self, tiled_latents, full_width, full_height, tile_size, overlap, overlap_feather_rate):
+    @classmethod
+    def execute(cls, tiled_latents, full_width, full_height, tile_size, overlap, overlap_feather_rate) -> io.NodeOutput:
         device = tiled_latents["samples"].device
         dtype = tiled_latents["samples"].dtype
         batch_latents = tiled_latents["samples"]
         
         # 1. Recalculate tile positions
-        its = ImageTiledKSamplerWithTagger()
-        tiles = its._calculate_tiles(full_width, full_height, tile_size, overlap)
+        tiles = TileHelper._calculate_tiles(full_width, full_height, tile_size, overlap)
         
         # 2. Setup Canvas
         lw = full_width // 8
@@ -314,41 +324,42 @@ class OverlappedLatentMerge:
         weight_map = weight_map.clamp(min=1e-5)
         output = output / weight_map
         
-        return ({"samples": output},)
+        return io.NodeOutput({"samples": output})
 
 # ==========================================
-# Image Utilities
+# Image Merging Utilities
 # ==========================================    
-class OverlappedImageMerge:
+class OverlappedImageMerge(io.ComfyNode):
     """
     Merge tiled images with corrected feathering and overlap dominance.
     """
     @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "images": ("IMAGE",),
-                "full_width": ("INT", {"default": 0, "min": 0, "max": 65536, "step": 8}),
-                "full_height": ("INT", {"default": 0, "min": 0, "max": 65536, "step": 8}),
-                "tile_size": ("INT", {"default": 1280, "min": 512, "max": 4096, "step": 64}),
-                "overlap": ("INT", {"default": 64, "min": 64, "max": 256, "step": 64}),
-                "overlap_feather_rate": ("FLOAT", {"default": 1, "min": 0.1, "max": 4, "step": 0.1}),
-            },
-        }
-
-    RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("image",)
-    FUNCTION = "merge"
-    CATEGORY = CAT
-    DESCRIPTION = "Merge tiled images using geometric feathering and overlap priority."
-
-    def merge(self, images, full_width, full_height, tile_size, overlap, overlap_feather_rate):
-        device = images.device
-        N, H, W, C = images.shape
+    def define_schema(cls):
+        return io.Schema(
+            node_id="OverlappedImageMerge_MiraSubPack",
+            display_name="Overlapped Image Merge",
+            category=CAT,
+            description="Merge tiled images using geometric feathering and overlap priority.",
+            inputs=[
+                io.Image.Input("tiled_images", optional=False, tooltip="Tiled images input."),
+                io.Int.Input("full_width", default=0, min=0, max=65536, step=8, tooltip="Full image width."),
+                io.Int.Input("full_height", default=0, min=0, max=65536, step=8, tooltip="Full image height."),
+                io.Int.Input("tile_size", default=1280, min=512, max=4096, step=64),
+                io.Int.Input("overlap", default=64, min=64, max=256, step=64),
+                io.Float.Input("overlap_feather_rate", default=1.0, min=0.1, max=4.0, step=0.1, tooltip="Feathering rate multiplier."),
+            ],
+            outputs=[
+                io.Image.Output()
+            ],
+        )
+        
+    @classmethod
+    def execute(cls, tiled_images, full_width, full_height, tile_size, overlap, overlap_feather_rate) -> io.NodeOutput:
+        device = tiled_images.device
+        N, H, W, C = tiled_images.shape
         
         # 1. Calculate tile positions
-        its = ImageTiledKSamplerWithTagger()
-        tiles = its._calculate_tiles(full_width, full_height, tile_size, overlap)
+        tiles = TileHelper._calculate_tiles(full_width, full_height, tile_size, overlap)
         
         # 2. Setup Canvas
         # canvas needs to hold color, so it uses C channels (usually 3)
@@ -367,7 +378,7 @@ class OverlappedImageMerge:
         for idx, (x, y, w, h) in enumerate(tiles):
             if idx >= N: break
             
-            tile = images[idx] # [H, W, C]
+            tile = tiled_images[idx] # [H, W, C]
             
             # Crop tile to expected size (safety check)
             tile = tile[:h, :w, :]
@@ -417,33 +428,64 @@ class OverlappedImageMerge:
         weight_map = weight_map.clamp(min=1e-5)
         canvas = canvas / weight_map
         
-        return (canvas.unsqueeze(0),)
+        return io.NodeOutput(canvas.unsqueeze(0))
 
-class ImageCropTiles:
+# ==========================================
+# Image Crop Utilities
+# ==========================================    
+class ImageCropTiles(io.ComfyNode):
     """
     Crop image into overlapping tiles. 
     Kept original adaptability logic but ensured compatibility with new grid system.
     """
-
     @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "image": ("IMAGE",),
-                "tile_size": ("INT", {"default": 1024, "min": 512, "max": 4096, "step": 64}),
-                "overlap": ("INT", {"default": 64, "min": 64, "max": 256, "step": 64}),
-                "adaptable_tile_size": ("BOOLEAN", {"default": True}),
-                "adaptable_max_deviation": ("INT", {"default": 256, "min": 64, "max": 1024, "step": 64}),
-            },
-        }
+    def define_schema(cls):
+        return io.Schema(
+            node_id="ImageCropTiles_MiraSubPack",
+            display_name="Image Crop to Tiles",
+            category=CAT,
+            description="Crop image into overlapping tiles.",
+            inputs=[
+                io.Image.Input("image", optional=False),
+                io.Int.Input("tile_size", default=1024, min=512, max=4096, step=64),
+                io.Int.Input("overlap", default=64, min=64, max=256, step=64),
+                io.Boolean.Input("adaptable_tile_size", default=True),
+                io.Int.Input("adaptable_max_deviation", default=256, min=64, max=1024, step=64),
+            ],
+            outputs=[
+                io.Image.Output(display_name="tiled_images"),
+                io.Int.Output(display_name="full_width"),
+                io.Int.Output(display_name="full_height"),
+                io.Int.Output(display_name="effective_tile_size"),
+                io.Int.Output(display_name="tile_overlap"),
+                io.Int.Output(display_name="original_tile_size"),
+            ],
+            is_output_node=True
+        )
+        
+    @classmethod
+    def execute(cls, image, tile_size, overlap, adaptable_tile_size, adaptable_max_deviation=256) -> io.NodeOutput:
+        if not isinstance(image, torch.Tensor): raise ValueError("Input 'image' must be a torch.Tensor")        
+        if image.ndim == 3: image = image.unsqueeze(0)
+        source = image[0]
+        H, W, _ = source.shape
 
-    RETURN_TYPES = ("IMAGE", "INT", "INT", "INT", "INT", "INT")
-    RETURN_NAMES = ("tiled_images", "full_width", "full_height", "effective_tile_size", "overlap", "original_tile_size")
-    FUNCTION = "crop"
-    CATEGORY = CAT
-    DESCRIPTION = "Crop image into overlapping tiles."
+        effective_tile_size = tile_size
+        if adaptable_tile_size:
+            effective_tile_size = cls._find_optimal_tile_size(W, H, tile_size, overlap, adaptable_max_deviation)
 
-    def _find_optimal_tile_size(self, W, H, base_tile_size, overlap, max_deviation):
+        tiles = TileHelper._calculate_tiles(W, H, effective_tile_size, overlap)
+        
+        tile_list = []
+        for x, y, w, h in tiles:
+            tile_img = source[y:y+h, x:x+w, :]
+            tile_list.append(tile_img)
+
+        cropped_tiles = torch.stack(tile_list, dim=0)
+        return io.NodeOutput(cropped_tiles, W, H, effective_tile_size, overlap, tile_size)
+    
+    @staticmethod
+    def _find_optimal_tile_size(W, H, base_tile_size, overlap, max_deviation):
         if base_tile_size <= overlap: 
             aligned = (base_tile_size // 8) * 8
             return aligned
@@ -495,24 +537,3 @@ class ImageCropTiles:
             coverage = (n_long - 1) * step + best_effective
         
         return best_effective
-
-    def crop(self, image, tile_size, overlap, adaptable_tile_size, adaptable_max_deviation=256):
-        if not isinstance(image, torch.Tensor): raise ValueError("Input 'image' must be a torch.Tensor")        
-        if image.ndim == 3: image = image.unsqueeze(0)
-        source = image[0]
-        H, W, _ = source.shape
-
-        effective_tile_size = tile_size
-        if adaptable_tile_size:
-            effective_tile_size = self._find_optimal_tile_size(W, H, tile_size, overlap, adaptable_max_deviation)
-
-        its = ImageTiledKSamplerWithTagger()
-        tiles = its._calculate_tiles(W, H, effective_tile_size, overlap)
-        
-        tile_list = []
-        for x, y, w, h in tiles:
-            tile_img = source[y:y+h, x:x+w, :]
-            tile_list.append(tile_img)
-
-        cropped_tiles = torch.stack(tile_list, dim=0)
-        return (cropped_tiles, W, H, effective_tile_size, overlap, tile_size)
