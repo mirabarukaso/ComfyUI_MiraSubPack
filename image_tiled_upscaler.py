@@ -357,7 +357,7 @@ class OverlappedImageMerge:
         weight_map = torch.zeros((full_height, full_width, 1), device=device, dtype=torch.float32)
         
         feather = max(overlap * 4, int(overlap * overlap_feather_rate))
-        feather = min(tile_size * 0.25, feather)
+        feather = int(min(tile_size * 0.25, feather))
         
         row_last_x_end = {}
         col_last_y_end = {}
