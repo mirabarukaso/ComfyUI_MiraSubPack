@@ -444,23 +444,56 @@ class ImageCropTiles:
     DESCRIPTION = "Crop image into overlapping tiles."
 
     def _find_optimal_tile_size(self, W, H, base_tile_size, overlap, max_deviation):
-        if base_tile_size <= overlap: return base_tile_size
+        if base_tile_size <= overlap: 
+            aligned = (base_tile_size // 8) * 8
+            return aligned
+        
         longer = max(W, H)
         best_effective = base_tile_size
         best_score = float('inf')
+        
         for adj in range(-max_deviation, max_deviation + 1):
             effective = base_tile_size + adj
-            if effective <= overlap: continue
+            if effective <= overlap: 
+                continue
+            
             step = effective - overlap
-            if step <= 0: continue
+            if step <= 0: 
+                continue
+            
+            # Calculate number of tiles needed
             n_long = math.ceil(longer / step)
+            
+            # Actual coverage: (number of tiles - 1) * step + effective
             coverage = (n_long - 1) * step + effective
+            
+            # Extra pixels
             extra = coverage - longer
-            if extra < 0: continue
+            
+            # Must fully cover, extra >= 0 is guaranteed
+            if extra < 0: 
+                continue
+            
             score = extra + abs(adj) * 0.1
             if score < best_score:
                 best_score = score
                 best_effective = effective
+        
+        # Ensure alignment to 8px
+        best_effective = (best_effective // 8) * 8
+        
+        # Check coverage again
+        step = best_effective - overlap
+        n_long = math.ceil(longer / step)
+        coverage = (n_long - 1) * step + best_effective
+        
+        # In case of insufficient coverage, align up to next multiple of 8
+        while coverage < longer:
+            best_effective += 8
+            step = best_effective - overlap
+            n_long = math.ceil(longer / step)
+            coverage = (n_long - 1) * step + best_effective
+        
         return best_effective
 
     def crop(self, image, tile_size, overlap, adaptable_tile_size, adaptable_max_deviation=256):
