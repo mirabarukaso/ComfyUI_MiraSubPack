@@ -9,7 +9,20 @@ CAT = "Mira/SubPack"
 
 # ==========================================
 # Common Helper
-# ==========================================    
+# ==========================================
+@io.comfytype(io_type="mira_image_tiled_upscaler_pipeline")
+class MiraITUPipeline:
+    Type = list  # Python type hint
+
+    class Input(io.Input):
+        def __init__(self, id: str, **kwargs):
+            super().__init__(id, **kwargs)
+
+    class Output(io.Output):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+MiraITUPipeline = io.Custom("mira_image_tiled_upscaler_pipeline")
+            
 class FeatherBlendHelper:
     """
     Shared Feathering Blend Helper Class
@@ -68,99 +81,161 @@ class FeatherBlendHelper:
 
 class TileHelper:
     @staticmethod
-    def _calculate_tiles(width, height, tile_size, overlap):
-        """Standard grid calculation."""
+    def _find_optimal_tile_size(W, H, base_tile_size, overlap, max_deviation, max_aspect_ratio=1.33):
+        """
+        Find the optimal tile dimensions separately for width and height.
+
+        Args:
+            W: Image width
+            H: Image height
+            base_tile_size: Target tile size
+            overlap: Overlap pixels between tiles
+            max_deviation: Maximum allowed deviation from base_tile_size
+            max_aspect_ratio: Maximum aspect ratio (e.g., 1.33 for 4:3, 1.25 for 5:4, 1.5 for 3:2)
+
+        Returns:
+            (tile_width, tile_height): Optimal tile width and height
+        """
+        if base_tile_size <= overlap:
+            aligned = (base_tile_size // 8) * 8
+            return aligned, aligned
+
+        def find_best_for_dimension(length):
+            """Find the optimal size for a single dimension"""
+            best_effective = base_tile_size
+            best_score = float('inf')
+
+            for adj in range(-max_deviation, max_deviation + 1):
+                effective = base_tile_size + adj
+                if effective <= overlap:
+                    continue
+
+                step = effective - overlap
+                if step <= 0:
+                    continue
+
+                # Calculate the number of tiles needed
+                n_tiles = math.ceil(length / step)
+
+                # Actual coverage range
+                coverage = (n_tiles - 1) * step + effective
+
+                # Extra pixels beyond the image dimension
+                extra = coverage - length
+
+                if extra < 0:
+                    continue
+
+                # Scoring: fewer extra pixels is better; smaller deviation from base_tile_size is better
+                score = extra + abs(adj) * 0.1
+                if score < best_score:
+                    best_score = score
+                    best_effective = effective
+
+            return best_effective
+
+        # Find optimal values separately for width and height
+        best_width = find_best_for_dimension(W)
+        best_height = find_best_for_dimension(H)
+
+        # Apply aspect ratio constraint
+        current_ratio = max(best_width, best_height) / max(1, min(best_width, best_height))
+
+        if current_ratio > max_aspect_ratio:
+            # Adjust to satisfy the aspect ratio constraint
+            # Prioritize reducing the larger dimension to meet the ratio
+            if best_width > best_height:
+                target_width = int(best_height * max_aspect_ratio)
+                # Find the closest value within the allowed deviation range
+                best_width = max(base_tile_size - max_deviation,
+                                 min(base_tile_size + max_deviation, target_width))
+            else:
+                target_height = int(best_width * max_aspect_ratio)
+                best_height = max(base_tile_size - max_deviation,
+                                  min(base_tile_size + max_deviation, target_height))
+
+        # Align to multiples of 8
+        best_width = (best_width // 8) * 8
+        best_height = (best_height // 8) * 8
+
+        # Verify coverage and increase tile size if necessary
+        def ensure_coverage(length, tile_size):
+            """Ensure tiles fully cover the image"""
+            step = tile_size - overlap
+            if step <= 0:
+                return tile_size
+
+            n_tiles = math.ceil(length / step)
+            coverage = (n_tiles - 1) * step + tile_size
+
+            while coverage < length:
+                tile_size += 8
+                step = tile_size - overlap
+                n_tiles = math.ceil(length / step)
+                coverage = (n_tiles - 1) * step + tile_size
+
+            return tile_size
+
+        best_width = ensure_coverage(W, best_width)
+        best_height = ensure_coverage(H, best_height)
+
+        return best_width, best_height
+
+    @staticmethod
+    def _calculate_tiles(width, height, tile_width, tile_height, overlap):
+        """
+        Calculate tile divisions using the specified tile width and height.
+
+        Args:
+            width: Image width
+            height: Image height
+            tile_width: Tile width
+            tile_height: Tile height
+            overlap: Overlap pixels
+
+        Returns:
+            List of (x, y, w, h): Coordinates and dimensions of each tile
+        """
         tiles = []
-        step_x = tile_size - overlap
-        step_y = tile_size - overlap
-        
-        # Ensure we cover the whole area
-        tiles_x = math.ceil((width - overlap) / step_x) if width > tile_size else 1
-        tiles_y = math.ceil((height - overlap) / step_y) if height > tile_size else 1
-        
+        step_x = tile_width - overlap
+        step_y = tile_height - overlap
+
+        # Calculate the number of tiles needed
+        tiles_x = math.ceil((width - overlap) / step_x) if width > tile_width else 1
+        tiles_y = math.ceil((height - overlap) / step_y) if height > tile_height else 1
+
         for i in range(tiles_y):
             for j in range(tiles_x):
                 x = j * step_x
                 y = i * step_y
-                
-                # Align last tiles to edges
-                if x + tile_size > width: x = width - tile_size
-                if y + tile_size > height: y = height - tile_size
-                
-                # Sanity check for small images
+
+                # Align the last column/row tiles to the edge
+                if x + tile_width > width:
+                    x = width - tile_width
+                if y + tile_height > height:
+                    y = height - tile_height
+
+                # Ensure coordinates are non-negative (for small images)
                 x = max(0, x)
                 y = max(0, y)
-                
-                # Snap to grid (8px)
+
+                # Align to 8-pixel grid
                 x = (int(x) // 8) * 8
                 y = (int(y) // 8) * 8
-                w = tile_size
-                h = tile_size
-                
-                # Clamp dimensions if image is smaller than tile_size
+                w = tile_width
+                h = tile_height
+
+                # Crop tile size if the image is smaller than the tile
                 w = min(w, width - x)
                 h = min(h, height - y)
                 w = (w // 8) * 8
                 h = (h // 8) * 8
-                
+
                 if w > 0 and h > 0:
                     tiles.append((x, y, w, h))
-                    
-        return sorted(list(set(tiles)), key=lambda t: (t[1], t[0]))
 
-    @staticmethod
-    def _find_optimal_tile_size(W, H, base_tile_size, overlap, max_deviation):
-        if base_tile_size <= overlap: 
-            aligned = (base_tile_size // 8) * 8
-            return aligned
-        
-        longer = max(W, H)
-        best_effective = base_tile_size
-        best_score = float('inf')
-        
-        for adj in range(-max_deviation, max_deviation + 1):
-            effective = base_tile_size + adj
-            if effective <= overlap: 
-                continue
-            
-            step = effective - overlap
-            if step <= 0: 
-                continue
-            
-            # Calculate number of tiles needed
-            n_long = math.ceil(longer / step)
-            
-            # Actual coverage: (number of tiles - 1) * step + effective
-            coverage = (n_long - 1) * step + effective
-            
-            # Extra pixels
-            extra = coverage - longer
-            
-            # Must fully cover, extra >= 0 is guaranteed
-            if extra < 0: 
-                continue
-            
-            score = extra + abs(adj) * 0.1
-            if score < best_score:
-                best_score = score
-                best_effective = effective
-        
-        # Ensure alignment to 8px
-        best_effective = (best_effective // 8) * 8
-        
-        # Check coverage again
-        step = best_effective - overlap
-        n_long = math.ceil(longer / step)
-        coverage = (n_long - 1) * step + best_effective
-        
-        # In case of insufficient coverage, align up to next multiple of 8
-        while coverage < longer:
-            best_effective += 8
-            step = best_effective - overlap
-            n_long = math.ceil(longer / step)
-            coverage = (n_long - 1) * step + best_effective
-        
-        return best_effective
+        # Remove duplicates and sort (first by y, then by x)
+        return sorted(list(set(tiles)), key=lambda t: (t[1], t[0]))
         
 # ==========================================
 # Ksampler with Tagger Support
@@ -189,11 +264,6 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
                 io.Combo.Input("sampler_name", default="euler_ancestral", options=comfy.samplers.KSampler.SAMPLERS),
                 io.Combo.Input("scheduler", default="beta", options=comfy.samplers.KSampler.SCHEDULERS),
                 io.Float.Input("denoise", default=0.35, min=0.0, max=1.0, step=0.01),
-                
-                #io.Int.Input("full_width", default=0, min=0, max=65536, step=8, tooltip="Full image width."),
-                #io.Int.Input("full_height", default=0, min=0, max=65536, step=8, tooltip="Full image height."),
-                #io.Int.Input("tile_size", default=1280, min=512, max=2048, step=64),
-                #io.Int.Input("overlap", default=64, min=64, max=256, step=64),
             ],
             outputs=[
                 io.Latent.Output(display_name="tiled_latents"),
@@ -202,8 +272,7 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
     
     @classmethod
     def execute(cls, model, clip, tiled_samples, common_positive, common_negative, tagger_text,
-               seed, steps, cfg, sampler_name, scheduler, denoise 
-               #full_width, full_height, tile_size, overlap
+               seed, steps, cfg, sampler_name, scheduler, denoise
                ) -> io.NodeOutput:                                
         negative_tokens = clip.tokenize(common_negative)
         negative_conditioning = clip.encode_from_tokens_scheduled(negative_tokens)
@@ -278,11 +347,8 @@ class OverlappedLatentMerge(io.ComfyNode):
             description="Merge overlapped latent tiles using geometric feathering and overlap priority.",
             inputs=[
                 io.Latent.Input("tiled_latents", optional=False, tooltip="Tiled latents input."),
-                io.Int.Input("full_width", default=0, min=0, max=65536, step=8, tooltip="Full image width."),
-                io.Int.Input("full_height", default=0, min=0, max=65536, step=8, tooltip="Full image height."),
-                io.Int.Input("tile_size", default=1024, min=512, max=4096, step=64),
-                io.Int.Input("overlap", default=64, min=64, max=256, step=64),
-                io.Float.Input("overlap_feather_rate", default=1.0, min=0.1, max=4.0, step=0.1, tooltip="Feathering rate multiplier."),
+                MiraITUPipeline.Input("upscaled_pipeline",optional=False, tooltip="Upscaled pipeline info from tiling node."),
+                io.Float.Input("feather_rate_override", default=1.0, min=0.1, max=4.0, step=0.1, tooltip="Override fathering rate multiplier if value is not same."),
             ],
             outputs=[
                 io.Latent.Output()
@@ -290,13 +356,17 @@ class OverlappedLatentMerge(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, tiled_latents, full_width, full_height, tile_size, overlap, overlap_feather_rate) -> io.NodeOutput:
+    def execute(cls, tiled_latents, upscaled_pipeline, feather_rate_override) -> io.NodeOutput:
+        (full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate) = upscaled_pipeline
+        if feather_rate_override != overlap_feather_rate:
+            overlap_feather_rate = feather_rate_override
+            
         device = tiled_latents["samples"].device
         dtype = tiled_latents["samples"].dtype
         batch_latents = tiled_latents["samples"]
         
         # 1. Recalculate tile positions
-        tiles = TileHelper._calculate_tiles(full_width, full_height, tile_size, overlap)
+        tiles = TileHelper._calculate_tiles(full_width, full_height, tile_width, tile_height, overlap)
         
         # 2. Setup Canvas
         lw = full_width // 8
@@ -308,7 +378,7 @@ class OverlappedLatentMerge(io.ComfyNode):
         
         # 3. Feathering params
         feather_px = max(overlap * 4, int(overlap * overlap_feather_rate))
-        feather_px = min(tile_size * 0.25, feather_px)
+        feather_px = min(max(tile_width, tile_height) * 0.25, feather_px)
         l_feather = int(feather_px // 8)
         
         # Track previous tile end positions to detect overlap ratio
@@ -396,11 +466,8 @@ class OverlappedImageMerge(io.ComfyNode):
             description="Merge tiled images using geometric feathering and overlap priority.",
             inputs=[
                 io.Image.Input("tiled_images", optional=False, tooltip="Tiled images input."),
-                io.Int.Input("full_width", default=0, min=0, max=65536, step=8, tooltip="Full image width."),
-                io.Int.Input("full_height", default=0, min=0, max=65536, step=8, tooltip="Full image height."),
-                io.Int.Input("tile_size", default=1280, min=512, max=4096, step=64),
-                io.Int.Input("overlap", default=64, min=64, max=256, step=64),
-                io.Float.Input("overlap_feather_rate", default=1.0, min=0.1, max=4.0, step=0.1, tooltip="Feathering rate multiplier."),
+                MiraITUPipeline.Input("upscaled_pipeline", optional=False, tooltip="Upscaled pipeline info from tiling node."),
+                io.Float.Input("feather_rate_override", default=1.0, min=0.1, max=4.0, step=0.1, tooltip="Override fathering rate multiplier if value is not same."),
             ],
             outputs=[
                 io.Image.Output()
@@ -408,12 +475,16 @@ class OverlappedImageMerge(io.ComfyNode):
         )
         
     @classmethod
-    def execute(cls, tiled_images, full_width, full_height, tile_size, overlap, overlap_feather_rate) -> io.NodeOutput:
+    def execute(cls, tiled_images, upscaled_pipeline, feather_rate_override) -> io.NodeOutput:
+        (full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate) = upscaled_pipeline
+        if feather_rate_override != overlap_feather_rate:
+            overlap_feather_rate = feather_rate_override
+        
         device = tiled_images.device
         N, H, W, C = tiled_images.shape
         
         # 1. Calculate tile positions
-        tiles = TileHelper._calculate_tiles(full_width, full_height, tile_size, overlap)
+        tiles = TileHelper._calculate_tiles(full_width, full_height, tile_width, tile_height, overlap)
         
         # 2. Setup Canvas
         # canvas needs to hold color, so it uses C channels (usually 3)
@@ -422,7 +493,7 @@ class OverlappedImageMerge(io.ComfyNode):
         weight_map = torch.zeros((full_height, full_width, 1), device=device, dtype=torch.float32)
         
         feather = max(overlap * 4, int(overlap * overlap_feather_rate))
-        feather = int(min(tile_size * 0.25, feather))
+        feather = int(min(max(tile_width, tile_height) * 0.25, feather))
         
         row_last_x_end = {}
         col_last_y_end = {}
@@ -503,32 +574,35 @@ class ImageCropTiles(io.ComfyNode):
                 io.Image.Input("image", optional=False),
                 io.Int.Input("tile_size", default=1024, min=512, max=4096, step=64),
                 io.Int.Input("overlap", default=64, min=64, max=256, step=64),
+                io.Float.Input("overlap_feather_rate", default=1.0, min=0.1, max=4.0, step=0.1, tooltip="Feathering rate multiplier."),
                 io.Boolean.Input("adaptable_tile_size", default=True),
-                io.Int.Input("adaptable_max_deviation", default=256, min=64, max=1024, step=64),
+                io.Float.Input("adaptable_max_deviation_ratio", default=0.25, min=0.1, max=0.5, step=0.05),
+                io.Float.Input("adaptable_max_aspect_ratio", default=1.33, min=1.0, max=2.0, step=0.01, 
+                               tooltip="Max aspect ratio (W/H or H/W) for adaptable tile sizing.\n5:4=1.25, 4:3=1.33, 16:9=1.78, 21:9=2.33."),
             ],
             outputs=[
-                io.Image.Output(display_name="tiled_images"),
-                io.Int.Output(display_name="full_width"),
-                io.Int.Output(display_name="full_height"),
-                io.Int.Output(display_name="effective_tile_size"),
-                io.Int.Output(display_name="tile_overlap"),
-                io.Int.Output(display_name="original_tile_size"),
+                io.Image.Output(display_name="tiled_images"),                             
+                MiraITUPipeline.Output(display_name="upscaled_pipeline"),
+                io.String.Output(display_name="upscaled_pipeline_info"),
             ],
             is_output_node=True
         )
         
     @classmethod
-    def execute(cls, image, tile_size, overlap, adaptable_tile_size, adaptable_max_deviation=256) -> io.NodeOutput:
+    def execute(cls, image, tile_size, overlap, overlap_feather_rate, adaptable_tile_size, adaptable_max_deviation_ratio=0.25, adaptable_max_aspect_ratio=1.33) -> io.NodeOutput:
         if not isinstance(image, torch.Tensor): raise ValueError("Input 'image' must be a torch.Tensor")        
         if image.ndim == 3: image = image.unsqueeze(0)
         source = image[0]
         H, W, _ = source.shape
 
-        effective_tile_size = tile_size
+        effective_tile_width, effective_tile_height = tile_size, tile_size
         if adaptable_tile_size:
-            effective_tile_size = TileHelper._find_optimal_tile_size(W, H, tile_size, overlap, adaptable_max_deviation)
+            value = int(round(tile_size * adaptable_max_deviation_ratio))
+            adaptable_max_deviation = (value // 8) * 8
+            print(f"[MiraSubPack:ImageCropTiles] adaptable_max_deviation set to {adaptable_max_deviation} pixels.")
+            effective_tile_width, effective_tile_height = TileHelper._find_optimal_tile_size(W, H, tile_size, overlap, adaptable_max_deviation, adaptable_max_aspect_ratio)
 
-        tiles = TileHelper._calculate_tiles(W, H, effective_tile_size, overlap)
+        tiles = TileHelper._calculate_tiles(W, H, effective_tile_width, effective_tile_height, overlap)
         
         tile_list = []
         for x, y, w, h in tiles:
@@ -536,7 +610,9 @@ class ImageCropTiles(io.ComfyNode):
             tile_list.append(tile_img)
 
         cropped_tiles = torch.stack(tile_list, dim=0)
-        return io.NodeOutput(cropped_tiles, W, H, effective_tile_size, overlap, tile_size)    
+        pipeline = (W, H, effective_tile_width, effective_tile_height, overlap, overlap_feather_rate)
+        upscaled_pipeline_info = f"Full: {W}x{H}\nTile: {len(tiles)} -> {effective_tile_width}x{effective_tile_height}\nOverlap: {overlap}\nFeatherRate: {overlap_feather_rate}\nOriginalTileSize: {tile_size}"
+        return io.NodeOutput(cropped_tiles, pipeline, upscaled_pipeline_info, upscaled_pipeline_info)    
     
 # ==========================================
 # Latent Crop Utilities
@@ -570,25 +646,32 @@ class LatentUpscaleAndCropTiles(io.ComfyNode):
                             tooltip="Size of each tile in pixels (will be converted to latent space)."),
                 io.Int.Input("overlap", default=64, min=64, max=256, step=64,
                             tooltip="Overlap between tiles in pixels."),
+                io.Float.Input("overlap_feather_rate", default=1.0, min=0.1, max=4.0, step=0.1, 
+                               tooltip="Feathering rate multiplier."),
                 io.Boolean.Input("adaptable_tile_size", default=True),
-                io.Int.Input("adaptable_max_deviation", default=256, min=64, max=1024, step=64),
+                io.Float.Input("adaptable_max_deviation_ratio", default=0.25, min=0.1, max=0.5, step=0.05),
+                io.Float.Input("adaptable_max_aspect_ratio", default=1.33, min=1.0, max=2.0, step=0.01, 
+                               tooltip="Max aspect ratio (W/H or H/W) for adaptable tile sizing.\n5:4=1.25, 4:3=1.33, 16:9=1.78, 21:9=2.33."),
             ],
             outputs=[
                 io.Latent.Output(display_name="tiled_latents"),
                 io.Int.Output(display_name="full_width"),
                 io.Int.Output(display_name="full_height"),
-                io.Int.Output(display_name="effective_tile_size"),
-                io.Int.Output(display_name="overlap"),
+                io.Int.Output(display_name="effective_tile_width"),
+                io.Int.Output(display_name="effective_tile_height"),
+                io.Int.Output(display_name="tile_overlap"),
+                io.Float.Output(display_name="tile_overlap_feather_rate"),
                 io.Int.Output(display_name="original_tile_size"),
                 io.Int.Output(display_name="original_width"),
-                io.Int.Output(display_name="original_height"),
+                io.Int.Output(display_name="original_height"),                
             ],
             is_output_node=True
         )
     
     @classmethod
     def execute(cls, latent, scale_factor, upscale_method, multi_stage, 
-                noise_strength, seed, tile_size, overlap, adaptable_tile_size, adaptable_max_deviation) -> io.NodeOutput:
+                noise_strength, seed, tile_size, overlap, overlap_feather_rate, 
+                adaptable_tile_size, adaptable_max_deviation_ratio=0.25, adaptable_max_aspect_ratio=1.33) -> io.NodeOutput:
         """
         Upscale latent and split into tiles for OverlappedLatentMerge.
         
@@ -669,15 +752,18 @@ class LatentUpscaleAndCropTiles(io.ComfyNode):
         # Now split the upscaled latent into tiles
         upscaled_latent = current_samples[0]  # [C, H, W]
         
-        effective_tile_size = tile_size
+        effective_tile_width, effective_tile_height = tile_size, tile_size
         if adaptable_tile_size:
-            effective_tile_size = TileHelper._find_optimal_tile_size(new_width, new_height, tile_size, overlap, adaptable_max_deviation)
+            value = int(round(tile_size * adaptable_max_deviation_ratio))
+            adaptable_max_deviation = (value // 8) * 8
+            print(f"[MiraSubPack:ImageCropTiles] adaptable_max_deviation set to {adaptable_max_deviation} pixels.")
+            effective_tile_width, effective_tile_height = TileHelper._find_optimal_tile_size(new_width, new_height, tile_size, overlap, adaptable_max_deviation, adaptable_max_aspect_ratio)
         
         # Calculate tile positions in pixel space
-        tiles = TileHelper._calculate_tiles(new_width, new_height, effective_tile_size, overlap)
+        tiles = TileHelper._calculate_tiles(new_width, new_height, effective_tile_width, effective_tile_height, overlap)
         
         print(f"[MiraSubPack:LatentUpscalerAdvanced] Splitting into {len(tiles)} tiles:")
-        print(f"  Tile size: {effective_tile_size}px, Overlap: {overlap}px")
+        print(f"  Tile size: {effective_tile_width}x{effective_tile_height}px, Overlap: {overlap}px")
         
         # Crop tiles from upscaled latent
         tile_list = []
@@ -699,13 +785,5 @@ class LatentUpscaleAndCropTiles(io.ComfyNode):
         print(f"  Tiled latents shape: {tiled_latents.shape}")
         print(f"  Ready for OverlappedLatentMerge with full_size={new_width}x{new_height}")
         
-        return io.NodeOutput(
-            {"samples": tiled_latents},  # Format compatible with OverlappedLatentMerge
-            new_width,
-            new_height,
-            effective_tile_size,
-            overlap,
-            tile_size,
-            orig_width,
-            orig_height
-        )
+        return io.NodeOutput({"samples": tiled_latents}, new_width, new_height, effective_tile_width, effective_tile_height, overlap, overlap_feather_rate, tile_size, orig_width, orig_height)
+    
