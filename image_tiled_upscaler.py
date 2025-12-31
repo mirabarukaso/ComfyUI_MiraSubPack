@@ -408,7 +408,7 @@ class OverlappedLatentMerge(io.ComfyNode):
             inputs=[
                 io.Latent.Input("tiled_latents", optional=False, tooltip="Tiled latents input."),
                 MiraITUPipeline.Input("mira_itu_pipeline",optional=False, tooltip="Mira Image Tiled Upscale pipeline info from tiling node."),
-                io.Float.Input("feather_rate_override", default=1.0, min=0.1, max=4.0, step=0.1, tooltip="Override fathering rate multiplier if value is not same."),
+                io.Float.Input("feather_rate_override", default=0, min=0, max=4.0, step=0.1, tooltip="Override fathering rate multiplier if value is not 0."),
             ],
             outputs=[
                 io.Latent.Output()
@@ -418,7 +418,8 @@ class OverlappedLatentMerge(io.ComfyNode):
     @classmethod
     def execute(cls, tiled_latents, mira_itu_pipeline, feather_rate_override) -> io.NodeOutput:
         (full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate) = mira_itu_pipeline
-        if feather_rate_override != overlap_feather_rate:
+        if round(feather_rate_override,2) != 0:
+            print(f"[MiraSubPack:OverlappedImageMerge] Override feather_rate to {feather_rate_override} ")
             overlap_feather_rate = feather_rate_override
             
         device = tiled_latents["samples"].device
@@ -527,7 +528,7 @@ class OverlappedImageMerge(io.ComfyNode):
             inputs=[
                 io.Image.Input("tiled_images", optional=False, tooltip="Tiled images input."),
                 MiraITUPipeline.Input("mira_itu_pipeline",optional=False, tooltip="Mira Image Tiled Upscale pipeline info from tiling node."),
-                io.Float.Input("feather_rate_override", default=1.0, min=0.1, max=4.0, step=0.1, tooltip="Override fathering rate multiplier if value is not same."),
+                io.Float.Input("feather_rate_override", default=0, min=0, max=4.0, step=0.1, tooltip="Override fathering rate multiplier if value is not 0."),
             ],
             outputs=[
                 io.Image.Output()
@@ -537,7 +538,8 @@ class OverlappedImageMerge(io.ComfyNode):
     @classmethod
     def execute(cls, tiled_images, mira_itu_pipeline, feather_rate_override) -> io.NodeOutput:
         (full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate) = mira_itu_pipeline
-        if feather_rate_override != overlap_feather_rate:
+        if round(feather_rate_override,2) != 0:
+            print(f"[MiraSubPack:OverlappedImageMerge] Override feather_rate to {feather_rate_override} ")
             overlap_feather_rate = feather_rate_override
         
         device = tiled_images.device
