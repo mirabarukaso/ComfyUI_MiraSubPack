@@ -1,7 +1,7 @@
 from .JoyCaption.beta_one import JoyCaptionNodeBetaOne, JoyCaptionBetaOneSimpleNode
 from .QwenImage.nodes_qwen import TextEncodeQwenImageEditMod, TextEncodeQwenImageEditPlusMod 
 from .image_util import ImageMergeByPixelAlign
-from .image_tiled_upscaler import ImageTiledKSamplerWithTagger, OverlappedImageMerge, OverlappedLatentMerge, ImageCropTiles, LatentUpscaleAndCropTiles
+from .image_tiled_upscaler import MiraITUPipelineExtract, MiraITUPipelineCombine, ImageTiledKSamplerWithTagger, OverlappedImageMerge, OverlappedLatentMerge, ImageCropTiles, LatentUpscaleAndCropTiles
 
 def __init__(self):
     pass
@@ -15,6 +15,8 @@ NODE_CLASS_MAPPINGS = {
     
     "ImageMergeByPixelAlign_MiraSubPack": ImageMergeByPixelAlign,
     
+    "MiraITUPipelineExtract_MiraSubPack": MiraITUPipelineExtract,
+    "MiraITUPipelineCombine_MiraSubPack": MiraITUPipelineCombine,
     "ImageTiledKSamplerWithTagger_MiraSubPack": ImageTiledKSamplerWithTagger,
     "OverlappedImageMerge_MiraSubPack": OverlappedImageMerge,
     "OverlappedLatentMerge_MiraSubPack": OverlappedLatentMerge,
@@ -31,6 +33,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     
     "ImageMergeByPixelAlign_MiraSubPack": "Image Merge By Pixel Align",
     
+    "MiraITUPipelineExtract_MiraSubPack": "Mira ITU Pipeline Extract",
+    "MiraITUPipelineCombine_MiraSubPack": "Mira ITU Pipeline Combine",
     "ImageTiledKSamplerWithTagger_MiraSubPack": "Tiled Image KSampler with Tagger",
     "OverlappedImageMerge_MiraSubPack": "Overlapped Image Merge",
     "OverlappedLatentMerge_MiraSubPack": "Overlapped Latent Merge",

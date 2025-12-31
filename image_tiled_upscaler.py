@@ -5,10 +5,10 @@ import comfy.samplers
 import latent_preview
 from comfy_api.latest import io
 
-CAT = "Mira/SubPack"
+CAT = "Mira/SubPack/Image Tiled Upscaler"
 
 # ==========================================
-# Common Helper
+# Custom Node Type Definition
 # ==========================================
 @io.comfytype(io_type="mira_image_tiled_upscaler_pipeline")
 class MiraITUPipeline:
@@ -22,7 +22,67 @@ class MiraITUPipeline:
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
 MiraITUPipeline = io.Custom("mira_image_tiled_upscaler_pipeline")
-            
+
+class MiraITUPipelineExtract(io.ComfyNode):
+    """
+    Extract Upscaled Pipeline Info
+    """    
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MiraITUPipelineExtract_MiraSubPack",
+            display_name="Mira ITU Pipeline Extract",
+            category=CAT,
+            description="Extract upscaled pipeline info.",
+            inputs=[
+                MiraITUPipeline.Input("mira_itu_pipeline", optional=False, tooltip="Upscaled pipeline info."),
+            ],
+            outputs=[
+                io.Int.Output(display_name="full_width"),
+                io.Int.Output(display_name="full_height"),
+                io.Int.Output(display_name="tile_width"),
+                io.Int.Output(display_name="tile_height"),
+                io.Int.Output(display_name="overlap"),
+                io.Float.Output(display_name="overlap_feather_rate"),
+            ],
+        )
+    
+    @classmethod
+    def execute(cls, mira_itu_pipeline) -> io.NodeOutput:
+        (full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate) = mira_itu_pipeline
+        return io.NodeOutput(full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate)
+    
+class MiraITUPipelineCombine(io.ComfyNode):
+    """
+    Combine Upscaled Pipeline Info
+    """    
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MiraITUPipelineCombine_MiraSubPack",
+            display_name="Mira ITU Pipeline Combine",
+            category=CAT,
+            description="Combine upscaled pipeline info.",
+            inputs=[
+                io.Int.Input("full_width", optional=False, tooltip="Full image width."),
+                io.Int.Input("full_height", optional=False, tooltip="Full image height."),
+                io.Int.Input("tile_width", optional=False, tooltip="Tile width."),
+                io.Int.Input("tile_height", optional=False, tooltip="Tile height."),
+                io.Int.Input("overlap", optional=False, tooltip="Overlap pixels."),
+                io.Float.Input("overlap_feather_rate", optional=False, tooltip="Overlap feather rate."),
+            ],
+            outputs=[
+                MiraITUPipeline.Output(display_name="mira_itu_pipeline"),
+            ],
+        )
+    
+    @classmethod
+    def execute(cls, full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate) -> io.NodeOutput:
+        return io.NodeOutput((full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate))
+
+# ==========================================
+# Common Helper
+# ==========================================            
 class FeatherBlendHelper:
     """
     Shared Feathering Blend Helper Class
@@ -347,7 +407,7 @@ class OverlappedLatentMerge(io.ComfyNode):
             description="Merge overlapped latent tiles using geometric feathering and overlap priority.",
             inputs=[
                 io.Latent.Input("tiled_latents", optional=False, tooltip="Tiled latents input."),
-                MiraITUPipeline.Input("upscaled_pipeline",optional=False, tooltip="Upscaled pipeline info from tiling node."),
+                MiraITUPipeline.Input("mira_itu_pipeline",optional=False, tooltip="Mira Image Tiled Upscale pipeline info from tiling node."),
                 io.Float.Input("feather_rate_override", default=1.0, min=0.1, max=4.0, step=0.1, tooltip="Override fathering rate multiplier if value is not same."),
             ],
             outputs=[
@@ -356,8 +416,8 @@ class OverlappedLatentMerge(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, tiled_latents, upscaled_pipeline, feather_rate_override) -> io.NodeOutput:
-        (full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate) = upscaled_pipeline
+    def execute(cls, tiled_latents, mira_itu_pipeline, feather_rate_override) -> io.NodeOutput:
+        (full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate) = mira_itu_pipeline
         if feather_rate_override != overlap_feather_rate:
             overlap_feather_rate = feather_rate_override
             
@@ -466,7 +526,7 @@ class OverlappedImageMerge(io.ComfyNode):
             description="Merge tiled images using geometric feathering and overlap priority.",
             inputs=[
                 io.Image.Input("tiled_images", optional=False, tooltip="Tiled images input."),
-                MiraITUPipeline.Input("upscaled_pipeline", optional=False, tooltip="Upscaled pipeline info from tiling node."),
+                MiraITUPipeline.Input("mira_itu_pipeline",optional=False, tooltip="Mira Image Tiled Upscale pipeline info from tiling node."),
                 io.Float.Input("feather_rate_override", default=1.0, min=0.1, max=4.0, step=0.1, tooltip="Override fathering rate multiplier if value is not same."),
             ],
             outputs=[
@@ -475,8 +535,8 @@ class OverlappedImageMerge(io.ComfyNode):
         )
         
     @classmethod
-    def execute(cls, tiled_images, upscaled_pipeline, feather_rate_override) -> io.NodeOutput:
-        (full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate) = upscaled_pipeline
+    def execute(cls, tiled_images, mira_itu_pipeline, feather_rate_override) -> io.NodeOutput:
+        (full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate) = mira_itu_pipeline
         if feather_rate_override != overlap_feather_rate:
             overlap_feather_rate = feather_rate_override
         
@@ -582,8 +642,8 @@ class ImageCropTiles(io.ComfyNode):
             ],
             outputs=[
                 io.Image.Output(display_name="tiled_images"),                             
-                MiraITUPipeline.Output(display_name="upscaled_pipeline"),
-                io.String.Output(display_name="upscaled_pipeline_info"),
+                MiraITUPipeline.Output(display_name="mira_itu_pipeline"),
+                io.String.Output(display_name="mira_itu_pipeline_info"),
             ],
             is_output_node=True
         )
