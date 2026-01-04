@@ -693,7 +693,7 @@ class LatentUpscaleAndCropTiles(io.ComfyNode):
             description="Upscale latent and split into overlapping tiles for further processing.",
             inputs=[
                 io.Latent.Input("latent", optional=False, tooltip="Input latent to upscale and tile."),
-                io.Float.Input("scale_factor", default=2.0, min=0.5, max=8.0, step=0.25,
+                io.Float.Input("scale_factor", default=1.25, min=0.5, max=8.0, step=0.05,
                               tooltip="Upscaling factor (e.g., 2.0 = double size)."),
                 io.Combo.Input("upscale_method", default="bicubic",
                               options=["nearest", "bilinear", "bicubic", "area"],
