@@ -806,7 +806,7 @@ class LatentUpscaleAndCropTiles(io.ComfyNode):
         
         # Add noise if requested
         if noise_strength > 0:
-            noise = torch.randn(current_samples.shape, dtype=current_samples.dtype, device=current_samples.device, generator=torch.manual_seed(seed))
+            noise = torch.randn(current_samples.shape, dtype=current_samples.dtype, device=current_samples.device, generator=torch.manual_seed(seed+1))
             current_samples = current_samples + noise * noise_strength
             print(f"  Added noise: strength={noise_strength:.3f}, seed={seed}")
         
