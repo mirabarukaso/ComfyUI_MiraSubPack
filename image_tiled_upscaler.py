@@ -717,12 +717,11 @@ class LatentUpscaleAndCropTiles(io.ComfyNode):
             ],
             outputs=[
                 io.Latent.Output(display_name="tiled_latents"),
-                io.Int.Output(display_name="full_width"),
-                io.Int.Output(display_name="full_height"),
-                io.Int.Output(display_name="effective_tile_width"),
-                io.Int.Output(display_name="effective_tile_height"),
-                io.Int.Output(display_name="tile_overlap"),
-                io.Float.Output(display_name="tile_overlap_feather_rate"),
+                io.Latent.Output(display_name="full_latent"),
+                MiraITUPipeline.Output(),
+                io.String.Output(display_name="mira_itu_pipeline_info"),
+                
+                
                 io.Int.Output(display_name="original_tile_size"),
                 io.Int.Output(display_name="original_width"),
                 io.Int.Output(display_name="original_height"),                
@@ -768,12 +767,12 @@ class LatentUpscaleAndCropTiles(io.ComfyNode):
         # Perform upscaling
         current_samples = samples
         
-        if multi_stage and scale_factor > 2.0:
+        if multi_stage and scale_factor >= 2.0:
             # Multi-stage upscaling
             stages = []
             remaining_scale = scale_factor
             
-            while remaining_scale > 2.0:
+            while remaining_scale >= 2.0:
                 stages.append(2.0)
                 remaining_scale /= 2.0
             
@@ -847,5 +846,8 @@ class LatentUpscaleAndCropTiles(io.ComfyNode):
         print(f"  Tiled latents shape: {tiled_latents.shape}")
         print(f"  Ready for OverlappedLatentMerge with full_size={new_width}x{new_height}")
         
-        return io.NodeOutput({"samples": tiled_latents}, new_width, new_height, effective_tile_width, effective_tile_height, overlap, overlap_feather_rate, tile_size, orig_width, orig_height)
+        pipeline = (new_width, new_height, effective_tile_width, effective_tile_height, overlap, overlap_feather_rate)
+        upscaled_pipeline_info = f"Full: {new_width}x{new_height}\nTile: {len(tiles)} -> {effective_tile_width}x{effective_tile_height}\nOverlap: {overlap}\nFeatherRate: {overlap_feather_rate}\nOriginalTileSize: {tile_size}"
+        
+        return io.NodeOutput({"samples": tiled_latents}, {"samples": upscaled_latent.unsqueeze(0)}, pipeline, upscaled_pipeline_info, tile_size, orig_width, orig_height)
     
