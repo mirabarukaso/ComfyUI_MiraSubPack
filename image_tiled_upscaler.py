@@ -696,7 +696,7 @@ class LatentUpscaleAndCropTiles(io.ComfyNode):
                 io.Float.Input("scale_factor", default=1.25, min=0.5, max=8.0, step=0.05,
                               tooltip="Upscaling factor (e.g., 2.0 = double size)."),
                 io.Combo.Input("upscale_method", default="bicubic",
-                              options=["nearest", "bilinear", "bicubic", "area"],
+                              options=["nearest", "bilinear", "bicubic", "area", "nearest-exact"],
                               tooltip="Interpolation method for upscaling."),
                 io.Boolean.Input("multi_stage", default=True,
                                 tooltip="Use multi-stage upscaling for factors > 2.0 (smoother results)."),
@@ -850,4 +850,117 @@ class LatentUpscaleAndCropTiles(io.ComfyNode):
         upscaled_pipeline_info = f"Full: {new_width}x{new_height}\nTile: {len(tiles)} -> {effective_tile_width}x{effective_tile_height}\nOverlap: {overlap}\nFeatherRate: {overlap_feather_rate}\nOriginalTileSize: {tile_size}"
         
         return io.NodeOutput({"samples": tiled_latents}, {"samples": upscaled_latent.unsqueeze(0)}, pipeline, upscaled_pipeline_info, tile_size, orig_width, orig_height)
+    
+class LatentUpscaleSimple(io.ComfyNode):
+    """
+    Upscales input latent.
+    """
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LatentUpscaleSimple_MiraSubPack",
+            display_name="Latent Upscale with Add noise",
+            category=CAT,
+            description="Upscale latent.",
+            inputs=[
+                io.Latent.Input("latent", optional=False, tooltip="Input latent to upscale and tile."),
+                io.Float.Input("scale_factor", default=1.25, min=0.5, max=8.0, step=0.05,
+                              tooltip="Upscaling factor (e.g., 2.0 = double size)."),
+                io.Combo.Input("upscale_method", default="bicubic",
+                              options=["nearest", "bilinear", "bicubic", "area", "nearest-exact"],
+                              tooltip="Interpolation method for upscaling."),
+                io.Boolean.Input("multi_stage", default=True,
+                                tooltip="Use multi-stage upscaling for factors > 2.0 (smoother results)."),
+                io.Float.Input("noise_strength", default=0.0, min=0.0, max=1.0, step=0.01,
+                              tooltip="Add noise to upscaled latent (helps with detail generation)."),
+                io.Int.Input("seed", default=0, min=0, max=0xffffffffffffffff,
+                            tooltip="Seed for noise generation."),                
+            ],
+            outputs=[
+                io.Latent.Output(display_name="sample"),             
+            ],
+            is_output_node=True
+        )
+    
+    @classmethod
+    def execute(cls, latent, scale_factor, upscale_method, multi_stage, noise_strength, seed) -> io.NodeOutput:
+        """
+        Upscale latent and add noise.
+        """
+        samples = latent["samples"]
+        B, C, latent_h, latent_w = samples.shape
+        
+        # Original dimensions in pixel space
+        orig_width = latent_w * 8
+        orig_height = latent_h * 8
+        
+        # Calculate target dimensions
+        new_width = int(orig_width * scale_factor)
+        new_height = int(orig_height * scale_factor)
+        
+        # Align to 8px
+        new_width = (new_width // 8) * 8
+        new_height = (new_height // 8) * 8
+        new_width = max(8, new_width)
+        new_height = max(8, new_height)
+        
+        new_latent_w = new_width // 8
+        new_latent_h = new_height // 8
+        
+        print("[MiraSubPack:LatentUpscalerAdvanced] Upscaling latent:")
+        print(f"  Original: {orig_width}x{orig_height} ({latent_w}x{latent_h} latent)")
+        print(f"  Target: {new_width}x{new_height} ({new_latent_w}x{new_latent_h} latent)")
+        print(f"  Scale: {scale_factor:.3f}x")
+        print(f"  Method: {upscale_method}")
+        
+        # Perform upscaling
+        current_samples = samples
+        
+        if multi_stage and scale_factor >= 2.0:
+            # Multi-stage upscaling
+            stages = []
+            remaining_scale = scale_factor
+            
+            while remaining_scale >= 2.0:
+                stages.append(2.0)
+                remaining_scale /= 2.0
+            
+            if remaining_scale > 1.0:
+                stages.append(remaining_scale)
+            
+            print(f"  Multi-stage: {len(stages)} stages {stages}")
+            
+            for i, stage_scale in enumerate(stages):
+                current_h = current_samples.shape[2]
+                current_w = current_samples.shape[3]
+                stage_h = int(current_h * stage_scale)
+                stage_w = int(current_w * stage_scale)
+                
+                current_samples = torch.nn.functional.interpolate(
+                    current_samples,
+                    size=(stage_h, stage_w),
+                    mode=upscale_method,
+                    align_corners=False if upscale_method in ["bilinear", "bicubic"] else None
+                )
+                
+                print(f"    Stage {i+1}: {current_h}x{current_w} -> {stage_h}x{stage_w}")
+        else:
+            # Single-stage upscaling
+            current_samples = torch.nn.functional.interpolate(
+                current_samples,
+                size=(new_latent_h, new_latent_w),
+                mode=upscale_method,
+                align_corners=False if upscale_method in ["bilinear", "bicubic"] else None
+            )
+        
+        # Add noise if requested
+        if noise_strength > 0:
+            noise = torch.randn(current_samples.shape, dtype=current_samples.dtype, device=current_samples.device, generator=torch.manual_seed(seed+1))
+            current_samples = current_samples + noise * noise_strength
+            print(f"  Added noise: strength={noise_strength:.3f}, seed={seed}")
+        
+        # Now split the upscaled latent into tiles
+        upscaled_latent = current_samples[0]  # [C, H, W]
+                
+        return io.NodeOutput({"samples": upscaled_latent.unsqueeze(0)})
     

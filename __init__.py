@@ -1,7 +1,7 @@
 from .JoyCaption.beta_one import JoyCaptionNodeBetaOne, JoyCaptionBetaOneSimpleNode
 from .QwenImage.nodes_qwen import TextEncodeQwenImageEditMod, TextEncodeQwenImageEditPlusMod 
 from .image_util import ImageMergeByPixelAlign
-from .image_tiled_upscaler import MiraITUPipelineExtract, MiraITUPipelineCombine, ImageTiledKSamplerWithTagger, OverlappedImageMerge, OverlappedLatentMerge, ImageCropTiles, LatentUpscaleAndCropTiles
+from .image_tiled_upscaler import MiraITUPipelineExtract, MiraITUPipelineCombine, ImageTiledKSamplerWithTagger, OverlappedImageMerge, OverlappedLatentMerge, ImageCropTiles, LatentUpscaleAndCropTiles, LatentUpscaleSimple
 
 def __init__(self):
     pass
@@ -22,6 +22,7 @@ NODE_CLASS_MAPPINGS = {
     "OverlappedLatentMerge_MiraSubPack": OverlappedLatentMerge,
     "ImageCropTiles_MiraSubPack": ImageCropTiles,
     "LatentUpscaleAndCropTiles_MiraSubPack": LatentUpscaleAndCropTiles,
+    "LatentUpscaleSimple_MiraSubPack": LatentUpscaleSimple,
 }    
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -39,7 +40,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "OverlappedImageMerge_MiraSubPack": "Overlapped Image Merge",
     "OverlappedLatentMerge_MiraSubPack": "Overlapped Latent Merge",
     "ImageCropTiles_MiraSubPack": "Image Crop to Tiles",
-    "LatentUpscaleAndCropTiles_MiraSubPack": "Latent Upscale then Crop to Tiles",    
+    "LatentUpscaleAndCropTiles_MiraSubPack": "Latent Upscale then Crop to Tiles",
+    "LatentUpscaleSimple_MiraSubPack": "Latent Upscale with Add noise",
 }
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
