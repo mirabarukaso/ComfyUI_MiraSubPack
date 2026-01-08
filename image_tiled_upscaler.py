@@ -339,6 +339,7 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
 
         batch_latents = tiled_samples["samples"]
         print(f"[MiraSubPack:AutoTiledTagger] Using {len(batch_latents)} tiles.")
+        print(f"[MiraSubPack:AutoTiledTagger] tagger_text (for copy to SAA)\n{tagger_text}")
         
         # Parse tagger text mapping
         mapping = tagger_text.splitlines()
