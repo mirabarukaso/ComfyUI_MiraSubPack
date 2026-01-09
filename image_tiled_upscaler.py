@@ -313,7 +313,7 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
             description="Perform tiled image sampling with dynamic tagger-based prompts for each tile.",
             inputs=[
                 io.Model.Input("model"),
-                io.Clip.Input("clip"),
+                io.Clip.Input("clip"),                
                 io.Latent.Input("tiled_samples", tooltip="Tiled latents input from VAE."),
                 io.String.Input("common_positive", default="", multiline=True, tooltip="Common positive prompt for all tiles."),
                 io.String.Input("common_negative", default="bad quality, worst quality, worst detail, sketch", multiline=True, tooltip="Common negative prompt for all tiles."),
@@ -324,6 +324,7 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
                 io.Combo.Input("sampler_name", default="euler_ancestral", options=comfy.samplers.KSampler.SAMPLERS),
                 io.Combo.Input("scheduler", default="beta", options=comfy.samplers.KSampler.SCHEDULERS),
                 io.Float.Input("denoise", default=0.35, min=0.0, max=1.0, step=0.01),
+                io.Clip.Input("clip_negative", optional=True)
             ],
             outputs=[
                 io.Latent.Output(display_name="tiled_latents"),
@@ -332,10 +333,15 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
     
     @classmethod
     def execute(cls, model, clip, tiled_samples, common_positive, common_negative, tagger_text,
-               seed, steps, cfg, sampler_name, scheduler, denoise
-               ) -> io.NodeOutput:                                
-        negative_tokens = clip.tokenize(common_negative)
-        negative_conditioning = clip.encode_from_tokens_scheduled(negative_tokens)
+               seed, steps, cfg, sampler_name, scheduler, denoise, clip_negative = None
+               ) -> io.NodeOutput:
+        negative_conditioning = None
+        if clip_negative:
+            negative_tokens = clip_negative.tokenize(common_negative)
+            negative_conditioning = clip_negative.encode_from_tokens_scheduled(negative_tokens)    
+        else:
+            negative_tokens = clip.tokenize(common_negative)
+            negative_conditioning = clip.encode_from_tokens_scheduled(negative_tokens)
 
         batch_latents = tiled_samples["samples"]
         print(f"[MiraSubPack:AutoTiledTagger] Using {len(batch_latents)} tiles.")
