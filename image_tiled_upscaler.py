@@ -142,7 +142,7 @@ class FeatherBlendHelper:
 
 class TileHelper:
     @staticmethod
-    def _find_optimal_tile_size(W, H, base_tile_size, overlap, max_deviation, max_aspect_ratio=1.33):
+    def _find_optimal_tile_size(W, H, base_tile_size, overlap, max_deviation, max_aspect_ratio=1.33, pixel_alignment=8):
         """
         Find the optimal tile dimensions separately for width and height.
 
@@ -158,7 +158,7 @@ class TileHelper:
             (tile_width, tile_height): Optimal tile width and height
         """
         if base_tile_size <= overlap:
-            aligned = (base_tile_size // 8) * 8
+            aligned = (base_tile_size // pixel_alignment) * pixel_alignment
             return aligned, aligned
 
         def find_best_for_dimension(length):
@@ -215,9 +215,9 @@ class TileHelper:
                 best_height = max(base_tile_size - max_deviation,
                                   min(base_tile_size + max_deviation, target_height))
 
-        # Align to multiples of 8
-        best_width = (best_width // 8) * 8
-        best_height = (best_height // 8) * 8
+        # Align to the requested pixel grid
+        best_width = (best_width // pixel_alignment) * pixel_alignment
+        best_height = (best_height // pixel_alignment) * pixel_alignment
 
         # Verify coverage and increase tile size if necessary
         def ensure_coverage(length, tile_size):
@@ -230,7 +230,7 @@ class TileHelper:
             coverage = (n_tiles - 1) * step + tile_size
 
             while coverage < length:
-                tile_size += 8
+                tile_size += pixel_alignment
                 step = tile_size - overlap
                 n_tiles = math.ceil(length / step)
                 coverage = (n_tiles - 1) * step + tile_size
@@ -350,10 +350,10 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
         batch_latents = tiled_samples["samples"]
         print(f"[MiraSubPack:AutoTiledTagger] Using {len(batch_latents)} tiles.")
         print(f"[MiraSubPack:AutoTiledTagger] tagger_text (for copy to SAA)\n{tagger_text}")
-        
+                
         # Parse tagger text mapping
         mapping = tagger_text.splitlines()
-        tile_latents = None            
+        tile_latents = None
         for idx in range(len(batch_latents)):
             # Dynamic prompt construction
             dynamic_prompt = common_positive
@@ -364,7 +364,7 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
             
             single_latent = batch_latents[idx].unsqueeze(0)  # [C, H, W] -> [1, C, H, W]
             
-            print(f"  > Sampling Tile {idx+1}/{len(batch_latents)}: {single_latent.shape[3]*8}x{single_latent.shape[2]*8}")
+            print(f"  > Sampling Tile {idx+1}/{len(batch_latents)}: {single_latent.shape[3]}x{single_latent.shape[2]}")
             print(f"    Tags: {tags_str}")
             positive_tokens = clip.tokenize(dynamic_prompt)
             positive_conditioning = clip.encode_from_tokens_scheduled(positive_tokens)            
@@ -678,6 +678,7 @@ class ImageCropTiles(io.ComfyNode):
                 io.Float.Input("adaptable_max_deviation_ratio", default=0.25, min=0.1, max=0.5, step=0.05),
                 io.Float.Input("adaptable_max_aspect_ratio", default=1.33, min=1.0, max=2.0, step=0.01, 
                                tooltip="Max aspect ratio (W/H or H/W) for adaptable tile sizing.\n5:4=1.25, 4:3=1.33, 16:9=1.78, 21:9=2.33."),
+                io.Int.Input("pixel_alignment", default=8, min=8, max=256, step=8, tooltip="Align tile dimensions to multiples of this value (e.g., 8 for SDXL, 16 for FLUX.2)."),
             ],
             outputs=[
                 io.Image.Output(display_name="tiled_images"),                             
@@ -688,7 +689,7 @@ class ImageCropTiles(io.ComfyNode):
         )
         
     @classmethod
-    def execute(cls, image, tile_size, overlap, overlap_feather_rate, adaptable_tile_size, adaptable_max_deviation_ratio=0.25, adaptable_max_aspect_ratio=1.33) -> io.NodeOutput:
+    def execute(cls, image, tile_size, overlap, overlap_feather_rate, adaptable_tile_size, adaptable_max_deviation_ratio=0.25, adaptable_max_aspect_ratio=1.33, pixel_alignment=8) -> io.NodeOutput:
         if not isinstance(image, torch.Tensor): raise ValueError("Input 'image' must be a torch.Tensor")        
         if image.ndim == 3: image = image.unsqueeze(0)
         source = image[0]
@@ -697,9 +698,9 @@ class ImageCropTiles(io.ComfyNode):
         effective_tile_width, effective_tile_height = tile_size, tile_size
         if adaptable_tile_size:
             value = int(round(tile_size * adaptable_max_deviation_ratio))
-            adaptable_max_deviation = (value // 8) * 8
+            adaptable_max_deviation = (value // pixel_alignment) * pixel_alignment
             print(f"[MiraSubPack:ImageCropTiles] adaptable_max_deviation set to {adaptable_max_deviation} pixels.")
-            effective_tile_width, effective_tile_height = TileHelper._find_optimal_tile_size(W, H, tile_size, overlap, adaptable_max_deviation, adaptable_max_aspect_ratio)
+            effective_tile_width, effective_tile_height = TileHelper._find_optimal_tile_size(W, H, tile_size, overlap, adaptable_max_deviation, adaptable_max_aspect_ratio, pixel_alignment)
 
         tiles = TileHelper._calculate_tiles(W, H, effective_tile_width, effective_tile_height, overlap)
         
@@ -728,7 +729,7 @@ class ImageCropTilesByPixels(io.ComfyNode):
             inputs=[
                 io.Image.Input("image", optional=False),
                 io.Float.Input("max_pixels_per_tile", default=1.5, min=1.0, max=8.0, step=0.1,
-                            tooltip="Maximum pixels per tile in millions (e.g., 1.0M = 1048576 pixels = 1024x1024)."),
+                            tooltip="Maximum pixels per tile in millions (e.g., 1.0M = 1048576 pixels = 1024x1024)."),                
                 io.Int.Input("overlap", default=64, min=64, max=256, step=64),
                 io.Float.Input("overlap_feather_rate", default=1.0, min=0.1, max=4.0, step=0.1, 
                                tooltip="Feathering rate multiplier."),
@@ -736,6 +737,7 @@ class ImageCropTilesByPixels(io.ComfyNode):
                 io.Float.Input("adaptable_max_deviation_ratio", default=0.25, min=0.1, max=0.5, step=0.05),
                 io.Float.Input("adaptable_max_aspect_ratio", default=1.33, min=1.0, max=2.0, step=0.01, 
                                tooltip="Max aspect ratio (W/H or H/W) for adaptable tile sizing.\n5:4=1.25, 4:3=1.33, 16:9=1.78, 21:9=2.33."),
+                io.Int.Input("pixel_alignment", default=8, min=8, max=256, step=8, tooltip="Align tile dimensions to multiples of this value (e.g., 8 for SDXL, 16 for FLUX.2)."   ),
             ],
             outputs=[
                 io.Image.Output(display_name="tiled_images"),                             
@@ -746,7 +748,7 @@ class ImageCropTilesByPixels(io.ComfyNode):
         )
         
     @classmethod
-    def execute(cls, image, max_pixels_per_tile, overlap, overlap_feather_rate, adaptable_tile_size, adaptable_max_deviation_ratio=0.25, adaptable_max_aspect_ratio=1.33) -> io.NodeOutput:
+    def execute(cls, image, max_pixels_per_tile, overlap, overlap_feather_rate, adaptable_tile_size, adaptable_max_deviation_ratio=0.25, adaptable_max_aspect_ratio=1.33, pixel_alignment=8) -> io.NodeOutput:
         if not isinstance(image, torch.Tensor): 
             raise ValueError("Input 'image' must be a torch.Tensor")        
         if image.ndim == 3: 
@@ -762,7 +764,7 @@ class ImageCropTilesByPixels(io.ComfyNode):
         # Start with assumption of square tiles
         base_tile_size = int(math.sqrt(max_pixels_value))
         # Align to 8px
-        base_tile_size = (base_tile_size // 8) * 8
+        base_tile_size = (base_tile_size // pixel_alignment) * pixel_alignment
         base_tile_size = max(64, base_tile_size)  # Minimum 64 pixels
         
         actual_pixels = base_tile_size * base_tile_size
@@ -774,9 +776,9 @@ class ImageCropTilesByPixels(io.ComfyNode):
         effective_tile_width, effective_tile_height = base_tile_size, base_tile_size
         if adaptable_tile_size:
             value = int(round(base_tile_size * adaptable_max_deviation_ratio))
-            adaptable_max_deviation = (value // 8) * 8
+            adaptable_max_deviation = (value // pixel_alignment) * pixel_alignment
             print(f"[MiraSubPack:ImageCropTilesByPixels] adaptable_max_deviation set to {adaptable_max_deviation} pixels.")
-            effective_tile_width, effective_tile_height = TileHelper._find_optimal_tile_size(W, H, base_tile_size, overlap, adaptable_max_deviation, adaptable_max_aspect_ratio)
+            effective_tile_width, effective_tile_height = TileHelper._find_optimal_tile_size(W, H, base_tile_size, overlap, adaptable_max_deviation, adaptable_max_aspect_ratio, pixel_alignment)
 
         tiles = TileHelper._calculate_tiles(W, H, effective_tile_width, effective_tile_height, overlap)
         
@@ -828,6 +830,7 @@ class LatentUpscaleAndCropTiles(io.ComfyNode):
                 io.Float.Input("adaptable_max_deviation_ratio", default=0.25, min=0.1, max=0.5, step=0.05),
                 io.Float.Input("adaptable_max_aspect_ratio", default=1.33, min=1.0, max=2.0, step=0.01, 
                                tooltip="Max aspect ratio (W/H or H/W) for adaptable tile sizing.\n5:4=1.25, 4:3=1.33, 16:9=1.78, 21:9=2.33."),
+                io.Int.Input("pixel_alignment", default=8, min=8, max=256, step=8, tooltip="Align tile dimensions to multiples of this value (e.g., 8 for SDXL, 16 for FLUX.2)."   ),
             ],
             outputs=[
                 io.Latent.Output(display_name="tiled_latents"),
@@ -846,7 +849,7 @@ class LatentUpscaleAndCropTiles(io.ComfyNode):
     @classmethod
     def execute(cls, latent, scale_factor, upscale_method, multi_stage, 
                 noise_strength, seed, tile_size, overlap, overlap_feather_rate, 
-                adaptable_tile_size, adaptable_max_deviation_ratio=0.25, adaptable_max_aspect_ratio=1.33) -> io.NodeOutput:
+                adaptable_tile_size, adaptable_max_deviation_ratio=0.25, adaptable_max_aspect_ratio=1.33, pixel_alignment=8) -> io.NodeOutput:
         """
         Upscale latent and split into tiles for OverlappedLatentMerge.
         
@@ -930,9 +933,9 @@ class LatentUpscaleAndCropTiles(io.ComfyNode):
         effective_tile_width, effective_tile_height = tile_size, tile_size
         if adaptable_tile_size:
             value = int(round(tile_size * adaptable_max_deviation_ratio))
-            adaptable_max_deviation = (value // 8) * 8
+            adaptable_max_deviation = (value // pixel_alignment) * pixel_alignment
             print(f"[MiraSubPack:ImageCropTiles] adaptable_max_deviation set to {adaptable_max_deviation} pixels.")
-            effective_tile_width, effective_tile_height = TileHelper._find_optimal_tile_size(new_width, new_height, tile_size, overlap, adaptable_max_deviation, adaptable_max_aspect_ratio)
+            effective_tile_width, effective_tile_height = TileHelper._find_optimal_tile_size(new_width, new_height, tile_size, overlap, adaptable_max_deviation, adaptable_max_aspect_ratio, pixel_alignment)
         
         # Calculate tile positions in pixel space
         tiles = TileHelper._calculate_tiles(new_width, new_height, effective_tile_width, effective_tile_height, overlap)
