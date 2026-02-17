@@ -4,6 +4,7 @@ import comfy.sample
 import comfy.samplers
 import latent_preview
 from comfy_api.latest import io
+import node_helpers
 
 CAT = "Mira/SubPack/Image Tiled Upscaler"
 
@@ -324,7 +325,8 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
                 io.Combo.Input("sampler_name", default="euler_ancestral", options=comfy.samplers.KSampler.SAMPLERS),
                 io.Combo.Input("scheduler", default="beta", options=comfy.samplers.KSampler.SCHEDULERS),
                 io.Float.Input("denoise", default=0.35, min=0.0, max=1.0, step=0.01),
-                io.Clip.Input("clip_negative", optional=True)
+                io.Clip.Input("clip_negative", optional=True),
+                io.Latent.Input("ref_latents", optional=True),
             ],
             outputs=[
                 io.Latent.Output(display_name="tiled_latents"),
@@ -333,7 +335,7 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
     
     @classmethod
     def execute(cls, model, clip, tiled_samples, common_positive, common_negative, tagger_text,
-               seed, steps, cfg, sampler_name, scheduler, denoise, clip_negative = None
+               seed, steps, cfg, sampler_name, scheduler, denoise, clip_negative = None, ref_latents = None
                ) -> io.NodeOutput:
         negative_conditioning = None
         if clip_negative:
@@ -350,6 +352,12 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
         # Parse tagger text mapping
         mapping = tagger_text.splitlines()
         tile_latents = None
+        not_sdxl = False
+        if common_positive.startswith("[FLUX2]"):
+            not_sdxl = True            
+            common_positive = common_positive[len("[FLUX2]"):].strip()
+            print("[MiraSubPack:AutoTiledTagger] Detected [FLUX2] prefix, using FLUX2-style tag parsing.")
+            
         for idx in range(len(batch_latents)):
             # Dynamic prompt construction
             dynamic_prompt = common_positive
@@ -365,13 +373,37 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
             positive_tokens = clip.tokenize(dynamic_prompt)
             positive_conditioning = clip.encode_from_tokens_scheduled(positive_tokens)
             
+            if not_sdxl and ref_latents is not None:
+                all_ref_latent = ref_latents["samples"]
+                print("    Using provided reference latents for this tile.")                
+                ref_latent = all_ref_latent[idx].unsqueeze(0)                
+                
+                if clip_negative:
+                    negative_tokens = clip_negative.tokenize(common_negative)
+                    negative_conditioning = clip_negative.encode_from_tokens_scheduled(negative_tokens)    
+                else:
+                    negative_tokens = clip.tokenize(common_negative)
+                    negative_conditioning = clip.encode_from_tokens_scheduled(negative_tokens)
+                    
+                print("    Applying FLUX2-style reference latent injection.")
+                positive_conditioning = node_helpers.conditioning_set_values(positive_conditioning, {"reference_latents": [ref_latent]}, append=True)
+                negative_conditioning = node_helpers.conditioning_set_values(negative_conditioning, {"reference_latents": [ref_latent]}, append=True)
+                
+                del positive_tokens
+                del negative_tokens
+                torch.cuda.empty_cache()
+            
             print(f"    Tile latent shape: {single_latent.shape}")
             sampled_tile = cls._sample_single(
                 model, positive_conditioning, negative_conditioning, {"samples": single_latent},
                 seed, steps, cfg, sampler_name, scheduler, denoise
             )            
             tile_latents = torch.cat([tile_latents, sampled_tile["samples"]], dim=0) if tile_latents is not None else sampled_tile["samples"]
-                    
+            
+            if not_sdxl:
+                del positive_conditioning
+                del negative_conditioning
+                
         return io.NodeOutput({"samples": tile_latents})
     
     @staticmethod
@@ -681,6 +713,83 @@ class ImageCropTiles(io.ComfyNode):
         cropped_tiles = torch.stack(tile_list, dim=0)
         pipeline = (W, H, effective_tile_width, effective_tile_height, overlap, overlap_feather_rate)
         upscaled_pipeline_info = f"Full: {W}x{H}\nTile: {len(tiles)} -> {effective_tile_width}x{effective_tile_height}\nOverlap: {overlap}\nFeatherRate: {overlap_feather_rate}\nOriginalTileSize: {tile_size}"
+        return io.NodeOutput(cropped_tiles, pipeline, upscaled_pipeline_info, upscaled_pipeline_info)    
+
+class ImageCropTilesByPixels(io.ComfyNode):
+    """
+    Crop image into overlapping tiles based on maximum pixels per tile.
+    Automatically determines optimal tile size based on image dimensions and max pixels per tile.
+    """
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="ImageCropTilesByPixels_MiraSubPack",
+            display_name="Image Crop to Tiles by Pixels",
+            category=CAT,
+            description="Crop image into overlapping tiles based on maximum pixels per tile.",
+            inputs=[
+                io.Image.Input("image", optional=False),
+                io.Float.Input("max_pixels_per_tile", default=1.5, min=1.0, max=8.0, step=0.1,
+                            tooltip="Maximum pixels per tile in millions (e.g., 1.0M = 1048576 pixels = 1024x1024)."),
+                io.Int.Input("overlap", default=64, min=64, max=256, step=64),
+                io.Float.Input("overlap_feather_rate", default=1.0, min=0.1, max=4.0, step=0.1, 
+                               tooltip="Feathering rate multiplier."),
+                io.Boolean.Input("adaptable_tile_size", default=True),
+                io.Float.Input("adaptable_max_deviation_ratio", default=0.25, min=0.1, max=0.5, step=0.05),
+                io.Float.Input("adaptable_max_aspect_ratio", default=1.33, min=1.0, max=2.0, step=0.01, 
+                               tooltip="Max aspect ratio (W/H or H/W) for adaptable tile sizing.\n5:4=1.25, 4:3=1.33, 16:9=1.78, 21:9=2.33."),
+            ],
+            outputs=[
+                io.Image.Output(display_name="tiled_images"),                             
+                MiraITUPipeline.Output(display_name="mira_itu_pipeline"),
+                io.String.Output(display_name="mira_itu_pipeline_info"),
+            ],
+            is_output_node=True
+        )
+        
+    @classmethod
+    def execute(cls, image, max_pixels_per_tile, overlap, overlap_feather_rate, adaptable_tile_size, adaptable_max_deviation_ratio=0.25, adaptable_max_aspect_ratio=1.33) -> io.NodeOutput:
+        if not isinstance(image, torch.Tensor): 
+            raise ValueError("Input 'image' must be a torch.Tensor")        
+        if image.ndim == 3: 
+            image = image.unsqueeze(0)
+        
+        source = image[0]
+        H, W, _ = source.shape
+
+        # Convert megapixels to pixels (1.0M = 1048576 pixels)
+        max_pixels_value = int(max_pixels_per_tile * 1048576)
+        
+        # Calculate base tile size from max pixels
+        # Start with assumption of square tiles
+        base_tile_size = int(math.sqrt(max_pixels_value))
+        # Align to 8px
+        base_tile_size = (base_tile_size // 8) * 8
+        base_tile_size = max(64, base_tile_size)  # Minimum 64 pixels
+        
+        actual_pixels = base_tile_size * base_tile_size
+        print(f"[MiraSubPack:ImageCropTilesByPixels] Calculated base tile size: {base_tile_size}x{base_tile_size}")
+        print(f"  Max pixels per tile: {max_pixels_per_tile}M ({max_pixels_value} pixels)")
+        print(f"  Actual pixels per tile: {actual_pixels}")
+        print(f"  Image size: {W}x{H}")
+
+        effective_tile_width, effective_tile_height = base_tile_size, base_tile_size
+        if adaptable_tile_size:
+            value = int(round(base_tile_size * adaptable_max_deviation_ratio))
+            adaptable_max_deviation = (value // 8) * 8
+            print(f"[MiraSubPack:ImageCropTilesByPixels] adaptable_max_deviation set to {adaptable_max_deviation} pixels.")
+            effective_tile_width, effective_tile_height = TileHelper._find_optimal_tile_size(W, H, base_tile_size, overlap, adaptable_max_deviation, adaptable_max_aspect_ratio)
+
+        tiles = TileHelper._calculate_tiles(W, H, effective_tile_width, effective_tile_height, overlap)
+        
+        tile_list = []
+        for x, y, w, h in tiles:
+            tile_img = source[y:y+h, x:x+w, :]
+            tile_list.append(tile_img)
+
+        cropped_tiles = torch.stack(tile_list, dim=0)
+        pipeline = (W, H, effective_tile_width, effective_tile_height, overlap, overlap_feather_rate)
+        upscaled_pipeline_info = f"Full: {W}x{H}\nTile: {len(tiles)} -> {effective_tile_width}x{effective_tile_height}\nOverlap: {overlap}\nFeatherRate: {overlap_feather_rate}\nMaxPixelsPerTile: {max_pixels_per_tile}M"
         return io.NodeOutput(cropped_tiles, pipeline, upscaled_pipeline_info, upscaled_pipeline_info)    
     
 # ==========================================
