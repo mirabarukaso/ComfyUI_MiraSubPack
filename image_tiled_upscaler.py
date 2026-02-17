@@ -344,6 +344,8 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
         else:
             negative_tokens = clip.tokenize(common_negative)
             negative_conditioning = clip.encode_from_tokens_scheduled(negative_tokens)
+            
+        del negative_tokens
 
         batch_latents = tiled_samples["samples"]
         print(f"[MiraSubPack:AutoTiledTagger] Using {len(batch_latents)} tiles.")
@@ -374,7 +376,6 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
             positive_conditioning = clip.encode_from_tokens_scheduled(positive_tokens)
             
             del positive_tokens
-            del negative_tokens
             
             if not_sdxl and ref_latents is not None:
                 all_ref_latent = ref_latents["samples"]
