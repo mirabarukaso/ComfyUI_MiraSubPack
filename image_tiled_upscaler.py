@@ -353,13 +353,7 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
         
         # Parse tagger text mapping
         mapping = tagger_text.splitlines()
-        tile_latents = None
-        not_sdxl = False
-        if common_positive.startswith("[FLUX2]"):
-            not_sdxl = True            
-            common_positive = common_positive[len("[FLUX2]"):].strip()
-            print("[MiraSubPack:AutoTiledTagger] Detected [FLUX2] prefix, using FLUX2-style tag parsing.")
-            
+        tile_latents = None            
         for idx in range(len(batch_latents)):
             # Dynamic prompt construction
             dynamic_prompt = common_positive
@@ -373,11 +367,9 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
             print(f"  > Sampling Tile {idx+1}/{len(batch_latents)}: {single_latent.shape[3]*8}x{single_latent.shape[2]*8}")
             print(f"    Tags: {tags_str}")
             positive_tokens = clip.tokenize(dynamic_prompt)
-            positive_conditioning = clip.encode_from_tokens_scheduled(positive_tokens)
+            positive_conditioning = clip.encode_from_tokens_scheduled(positive_tokens)            
             
-            del positive_tokens
-            
-            if not_sdxl and ref_latents is not None:
+            if ref_latents is not None:
                 all_ref_latent = ref_latents["samples"]
                 print("    Using provided reference latents for this tile.")                
                 ref_latent = all_ref_latent[idx].unsqueeze(0)                
@@ -389,13 +381,15 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
                     negative_tokens = clip.tokenize(common_negative)
                     negative_conditioning = clip.encode_from_tokens_scheduled(negative_tokens)
                     
-                print("    Applying FLUX2-style reference latent injection.")
+                print("    Applying reference latent injection. (Works with Flux.2)")
                 positive_conditioning = node_helpers.conditioning_set_values(positive_conditioning, {"reference_latents": [ref_latent]}, append=True)
                 negative_conditioning = node_helpers.conditioning_set_values(negative_conditioning, {"reference_latents": [ref_latent]}, append=True)
                 
                 del positive_tokens
                 del negative_tokens
                 torch.cuda.empty_cache()
+            else:
+                del positive_tokens
             
             print(f"    Tile latent shape: {single_latent.shape}")
             sampled_tile = cls._sample_single(
@@ -404,7 +398,7 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
             )            
             tile_latents = torch.cat([tile_latents, sampled_tile["samples"]], dim=0) if tile_latents is not None else sampled_tile["samples"]
             
-            if not_sdxl and ref_latents is not None:
+            if ref_latents is not None:
                 del positive_conditioning
                 del negative_conditioning
                 
