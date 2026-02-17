@@ -243,7 +243,7 @@ class TileHelper:
         return best_width, best_height
 
     @staticmethod
-    def _calculate_tiles(width, height, tile_width, tile_height, overlap):
+    def _calculate_tiles(width, height, tile_width, tile_height, overlap, pixel_alignment):
         """
         Calculate tile divisions using the specified tile width and height.
 
@@ -280,17 +280,17 @@ class TileHelper:
                 x = max(0, x)
                 y = max(0, y)
 
-                # Align to 8-pixel grid
-                x = (int(x) // 8) * 8
-                y = (int(y) // 8) * 8
+                # Align to pixel_alignment grid
+                x = (int(x) // pixel_alignment) * pixel_alignment
+                y = (int(y) // pixel_alignment) * pixel_alignment
                 w = tile_width
                 h = tile_height
 
                 # Crop tile size if the image is smaller than the tile
                 w = min(w, width - x)
                 h = min(h, height - y)
-                w = (w // 8) * 8
-                h = (h // 8) * 8
+                w = (w // pixel_alignment) * pixel_alignment
+                h = (h // pixel_alignment) * pixel_alignment
 
                 if w > 0 and h > 0:
                     tiles.append((x, y, w, h))
@@ -405,9 +405,9 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
         return io.NodeOutput({"samples": tile_latents})
     
     @staticmethod
-    def _crop_latent(samples, x, y, width, height):
+    def _crop_latent(samples, x, y, width, height, pixel_alignment):
         latent = samples["samples"]
-        lx, ly, lw, lh = x//8, y//8, width//8, height//8
+        lx, ly, lw, lh = x//pixel_alignment, y//pixel_alignment, width//pixel_alignment, height//pixel_alignment
         cropped = latent[:, :, ly:ly+lh, lx:lx+lw].clone()
         # Padding if necessary (usually handled by clamp above, but safe to keep)
         if cropped.shape[2] != lh or cropped.shape[3] != lw:
@@ -446,6 +446,7 @@ class OverlappedLatentMerge(io.ComfyNode):
                 io.Latent.Input("tiled_latents", optional=False, tooltip="Tiled latents input."),
                 MiraITUPipeline.Input("mira_itu_pipeline",optional=False, tooltip="Mira Image Tiled Upscale pipeline info from tiling node."),
                 io.Float.Input("feather_rate_override", default=0, min=0, max=4.0, step=0.1, tooltip="Override fathering rate multiplier if value is not 0."),
+                io.Float.Input("pixel_alignment", default=8.0, min=1.0, max=64.0, step=1.0, tooltip="Pixel alignment for tile calculations (e.g., 8 for 8-pixel grid)."),
             ],
             outputs=[
                 io.Latent.Output()
@@ -453,7 +454,7 @@ class OverlappedLatentMerge(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, tiled_latents, mira_itu_pipeline, feather_rate_override) -> io.NodeOutput:
+    def execute(cls, tiled_latents, mira_itu_pipeline, feather_rate_override, pixel_alignment) -> io.NodeOutput:
         (full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate) = mira_itu_pipeline
         if round(feather_rate_override,2) != 0:
             print(f"[MiraSubPack:OverlappedImageMerge] Override feather_rate to {feather_rate_override} ")
@@ -464,11 +465,11 @@ class OverlappedLatentMerge(io.ComfyNode):
         batch_latents = tiled_latents["samples"]
         
         # 1. Recalculate tile positions
-        tiles = TileHelper._calculate_tiles(full_width, full_height, tile_width, tile_height, overlap)
+        tiles = TileHelper._calculate_tiles(full_width, full_height, tile_width, tile_height, overlap, pixel_alignment)
         
         # 2. Setup Canvas
-        lw = full_width // 8
-        lh = full_height // 8
+        lw = full_width // pixel_alignment
+        lh = full_height // pixel_alignment
         channels = batch_latents.shape[1]
         
         output = torch.zeros((1, channels, lh, lw), device=device, dtype=dtype)
@@ -477,7 +478,7 @@ class OverlappedLatentMerge(io.ComfyNode):
         # 3. Feathering params
         feather_px = max(overlap * 4, int(overlap * overlap_feather_rate))
         feather_px = min(max(tile_width, tile_height) * 0.25, feather_px)
-        l_feather = int(feather_px // 8)
+        l_feather = int(feather_px // pixel_alignment)
         
         # Track previous tile end positions to detect overlap ratio
         # row_y -> max_x_end
@@ -490,8 +491,8 @@ class OverlappedLatentMerge(io.ComfyNode):
             # Extract current tile
             tile_latent = batch_latents[idx] # [C, H, W]
             
-            lx, ly = x // 8, y // 8
-            lw_tile, lh_tile = w // 8, h // 8
+            lx, ly = x // pixel_alignment, y // pixel_alignment
+            lw_tile, lh_tile = w // pixel_alignment, h // pixel_alignment
             
             # Ensure dimensions match (handling potential rounding in calculation vs tensor)
             tile_latent = tile_latent[:, :lh_tile, :lw_tile]
@@ -573,7 +574,7 @@ class OverlappedImageMerge(io.ComfyNode):
         )
         
     @classmethod
-    def execute(cls, tiled_images, mira_itu_pipeline, feather_rate_override) -> io.NodeOutput:
+    def execute(cls, tiled_images, mira_itu_pipeline, feather_rate_override, pixel_alignment) -> io.NodeOutput:
         (full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate) = mira_itu_pipeline
         if round(feather_rate_override,2) != 0:
             print(f"[MiraSubPack:OverlappedImageMerge] Override feather_rate to {feather_rate_override} ")
@@ -583,7 +584,7 @@ class OverlappedImageMerge(io.ComfyNode):
         N, H, W, C = tiled_images.shape
         
         # 1. Calculate tile positions
-        tiles = TileHelper._calculate_tiles(full_width, full_height, tile_width, tile_height, overlap)
+        tiles = TileHelper._calculate_tiles(full_width, full_height, tile_width, tile_height, overlap, pixel_alignment)
         
         # 2. Setup Canvas
         # canvas needs to hold color, so it uses C channels (usually 3)
@@ -702,7 +703,7 @@ class ImageCropTiles(io.ComfyNode):
             print(f"[MiraSubPack:ImageCropTiles] adaptable_max_deviation set to {adaptable_max_deviation} pixels.")
             effective_tile_width, effective_tile_height = TileHelper._find_optimal_tile_size(W, H, tile_size, overlap, adaptable_max_deviation, adaptable_max_aspect_ratio, pixel_alignment)
 
-        tiles = TileHelper._calculate_tiles(W, H, effective_tile_width, effective_tile_height, overlap)
+        tiles = TileHelper._calculate_tiles(W, H, effective_tile_width, effective_tile_height, overlap, pixel_alignment)
         
         tile_list = []
         for x, y, w, h in tiles:
@@ -780,7 +781,7 @@ class ImageCropTilesByPixels(io.ComfyNode):
             print(f"[MiraSubPack:ImageCropTilesByPixels] adaptable_max_deviation set to {adaptable_max_deviation} pixels.")
             effective_tile_width, effective_tile_height = TileHelper._find_optimal_tile_size(W, H, base_tile_size, overlap, adaptable_max_deviation, adaptable_max_aspect_ratio, pixel_alignment)
 
-        tiles = TileHelper._calculate_tiles(W, H, effective_tile_width, effective_tile_height, overlap)
+        tiles = TileHelper._calculate_tiles(W, H, effective_tile_width, effective_tile_height, overlap, pixel_alignment)
         
         tile_list = []
         for x, y, w, h in tiles:
@@ -859,21 +860,21 @@ class LatentUpscaleAndCropTiles(io.ComfyNode):
         B, C, latent_h, latent_w = samples.shape
         
         # Original dimensions in pixel space
-        orig_width = latent_w * 8
-        orig_height = latent_h * 8
+        orig_width = latent_w * pixel_alignment
+        orig_height = latent_h * pixel_alignment
         
         # Calculate target dimensions
         new_width = int(orig_width * scale_factor)
         new_height = int(orig_height * scale_factor)
         
         # Align to 8px
-        new_width = (new_width // 8) * 8
-        new_height = (new_height // 8) * 8
-        new_width = max(8, new_width)
-        new_height = max(8, new_height)
+        new_width = (new_width // pixel_alignment) * pixel_alignment
+        new_height = (new_height // pixel_alignment) * pixel_alignment
+        new_width = max(pixel_alignment, new_width)
+        new_height = max(pixel_alignment, new_height)
         
-        new_latent_w = new_width // 8
-        new_latent_h = new_height // 8
+        new_latent_w = new_width // pixel_alignment
+        new_latent_h = new_height // pixel_alignment
         
         print("[MiraSubPack:LatentUpscalerAdvanced] Upscaling latent:")
         print(f"  Original: {orig_width}x{orig_height} ({latent_w}x{latent_h} latent)")
@@ -938,7 +939,7 @@ class LatentUpscaleAndCropTiles(io.ComfyNode):
             effective_tile_width, effective_tile_height = TileHelper._find_optimal_tile_size(new_width, new_height, tile_size, overlap, adaptable_max_deviation, adaptable_max_aspect_ratio, pixel_alignment)
         
         # Calculate tile positions in pixel space
-        tiles = TileHelper._calculate_tiles(new_width, new_height, effective_tile_width, effective_tile_height, overlap)
+        tiles = TileHelper._calculate_tiles(new_width, new_height, effective_tile_width, effective_tile_height, overlap, pixel_alignment)
         
         print(f"[MiraSubPack:LatentUpscalerAdvanced] Splitting into {len(tiles)} tiles:")
         print(f"  Tile size: {effective_tile_width}x{effective_tile_height}px, Overlap: {overlap}px")
@@ -947,8 +948,8 @@ class LatentUpscaleAndCropTiles(io.ComfyNode):
         tile_list = []
         for idx, (x, y, w, h) in enumerate(tiles):
             # Convert to latent space coordinates
-            lx, ly = x // 8, y // 8
-            lw, lh = w // 8, h // 8
+            lx, ly = x // pixel_alignment, y // pixel_alignment
+            lw, lh = w // pixel_alignment, h // pixel_alignment
             
             # Crop tile from upscaled latent
             tile_latent = upscaled_latent[:, ly:ly+lh, lx:lx+lw].clone()
@@ -991,7 +992,8 @@ class LatentUpscaleSimple(io.ComfyNode):
                 io.Float.Input("noise_strength", default=0.0, min=0.0, max=1.0, step=0.01,
                               tooltip="Add noise to upscaled latent (helps with detail generation)."),
                 io.Int.Input("seed", default=0, min=0, max=0xffffffffffffffff,
-                            tooltip="Seed for noise generation."),                
+                            tooltip="Seed for noise generation."),
+                io.Int.Input("pixel_alignment", default=8, min=8, max=256, step=8, tooltip="Align dimensions to multiples of this value (e.g., 8 for SDXL, 16 for FLUX.2)."   ),
             ],
             outputs=[
                 io.Latent.Output(display_name="sample"),             
@@ -1000,7 +1002,7 @@ class LatentUpscaleSimple(io.ComfyNode):
         )
     
     @classmethod
-    def execute(cls, latent, scale_factor, upscale_method, multi_stage, noise_strength, seed) -> io.NodeOutput:
+    def execute(cls, latent, scale_factor, upscale_method, multi_stage, noise_strength, seed, pixel_alignment) -> io.NodeOutput:
         """
         Upscale latent and add noise.
         """
@@ -1008,21 +1010,21 @@ class LatentUpscaleSimple(io.ComfyNode):
         B, C, latent_h, latent_w = samples.shape
         
         # Original dimensions in pixel space
-        orig_width = latent_w * 8
-        orig_height = latent_h * 8
+        orig_width = latent_w * pixel_alignment
+        orig_height = latent_h * pixel_alignment
         
         # Calculate target dimensions
         new_width = int(orig_width * scale_factor)
         new_height = int(orig_height * scale_factor)
         
-        # Align to 8px
-        new_width = (new_width // 8) * 8
-        new_height = (new_height // 8) * 8
-        new_width = max(8, new_width)
-        new_height = max(8, new_height)
+        # Align to pixel_alignment
+        new_width = (new_width // pixel_alignment) * pixel_alignment
+        new_height = (new_height // pixel_alignment) * pixel_alignment
+        new_width = max(pixel_alignment, new_width)
+        new_height = max(pixel_alignment, new_height)
         
-        new_latent_w = new_width // 8
-        new_latent_h = new_height // 8
+        new_latent_w = new_width // pixel_alignment
+        new_latent_h = new_height // pixel_alignment
         
         print("[MiraSubPack:LatentUpscalerAdvanced] Upscaling latent:")
         print(f"  Original: {orig_width}x{orig_height} ({latent_w}x{latent_h} latent)")
