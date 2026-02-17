@@ -299,6 +299,73 @@ class TileHelper:
 
         # Remove duplicates and sort (first by y, then by x)
         return sorted(list(set(tiles)), key=lambda t: (t[1], t[0]))
+    
+    @staticmethod
+    def _center_crop_to_alignment(image, pixel_alignment):
+        """
+        Center crop image dimensions to be aligned with pixel_alignment.
+        If W or H is not divisible by pixel_alignment, crops the excess pixels
+        symmetrically (center crop).
+        
+        Args:
+            image: Input tensor [H, W, C] or [H, W]
+            pixel_alignment: Target alignment value
+            
+        Returns:
+            Cropped image tensor and info dict with original/cropped dimensions
+        """
+        H, W = image.shape[0], image.shape[1]
+        
+        # Calculate aligned dimensions
+        aligned_W = (W // pixel_alignment) * pixel_alignment
+        aligned_H = (H // pixel_alignment) * pixel_alignment
+        
+        # Check if cropping is needed
+        needs_crop_W = W != aligned_W
+        needs_crop_H = H != aligned_H
+        
+        if needs_crop_W or needs_crop_H:
+            # Calculate crop amounts (center crop)
+            crop_W = W - aligned_W
+            crop_H = H - aligned_H
+            
+            # Center crop: distribute crop pixels symmetrically
+            left_crop = crop_W // 2
+            top_crop = crop_H // 2
+            
+            right_end = W - (crop_W - left_crop)
+            bottom_end = H - (crop_H - top_crop)
+            
+            # Perform center crop
+            cropped_image = image[top_crop:bottom_end, left_crop:right_end, ...]
+            
+            info = {
+                "original_width": W,
+                "original_height": H,
+                "aligned_width": aligned_W,
+                "aligned_height": aligned_H,
+                "cropped": True,
+                "crop_top": top_crop,
+                "crop_left": left_crop,
+                "crop_amount_w": crop_W,
+                "crop_amount_h": crop_H,
+            }
+            
+            return cropped_image, info
+        else:
+            # No cropping needed
+            info = {
+                "original_width": W,
+                "original_height": H,
+                "aligned_width": aligned_W,
+                "aligned_height": aligned_H,
+                "cropped": False,
+                "crop_top": 0,
+                "crop_left": 0,
+                "crop_amount_w": 0,
+                "crop_amount_h": 0,
+            }
+            return image, info
         
 # ==========================================
 # Ksampler with Tagger Support
@@ -709,6 +776,18 @@ class ImageCropTiles(io.ComfyNode):
         if W < pixel_alignment or H < pixel_alignment:
             raise ValueError(f"Image dimensions ({W}x{H}) are too small for pixel_alignment ({pixel_alignment})")
 
+        # ===== Center Crop Preprocessing =====
+        # Align image dimensions to pixel_alignment using center crop
+        source, crop_info = TileHelper._center_crop_to_alignment(source, pixel_alignment)
+        H, W = source.shape[0], source.shape[1]
+        
+        if crop_info["cropped"]:
+            print("[MiraSubPack:ImageCropTiles] ⚠ Image center cropped for pixel alignment:")
+            print(f"  Original: {crop_info['original_width']}x{crop_info['original_height']}")
+            print(f"  Cropped: {W}x{H}")
+            print(f"  Crop amount: W={crop_info['crop_amount_w']}px, H={crop_info['crop_amount_h']}px")
+            print(f"  Crop position: top={crop_info['crop_top']}, left={crop_info['crop_left']}")
+
         print(f"[MiraSubPack:ImageCropTiles] Processing image: {W}x{H}")
         print(f"  Tile size: {tile_size}, Overlap: {overlap}, Pixel alignment: {pixel_alignment}")
 
@@ -778,6 +857,18 @@ class ImageCropTilesByPixels(io.ComfyNode):
         if W < pixel_alignment or H < pixel_alignment:
             raise ValueError(f"Image dimensions ({W}x{H}) are too small for pixel_alignment ({pixel_alignment})")
 
+        # ===== Center Crop Preprocessing =====
+        # Align image dimensions to pixel_alignment using center crop
+        source, crop_info = TileHelper._center_crop_to_alignment(source, pixel_alignment)
+        H, W = source.shape[0], source.shape[1]
+        
+        if crop_info["cropped"]:
+            print("[MiraSubPack:ImageCropTilesByPixels] ⚠ Image center cropped for pixel alignment:")
+            print(f"  Original: {crop_info['original_width']}x{crop_info['original_height']}")
+            print(f"  Cropped: {W}x{H}")
+            print(f"  Crop amount: W={crop_info['crop_amount_w']}px, H={crop_info['crop_amount_h']}px")
+            print(f"  Crop position: top={crop_info['crop_top']}, left={crop_info['crop_left']}")
+
         # Convert megapixels to pixels (1.0M = 1048576 pixels)
         max_pixels_value = int(max_pixels_per_tile * 1048576)
         
@@ -817,6 +908,7 @@ class ImageCropTilesByPixels(io.ComfyNode):
         cropped_tiles = torch.stack(tile_list, dim=0)
         pipeline = (W, H, effective_tile_width, effective_tile_height, overlap, overlap_feather_rate, pixel_alignment)
         upscaled_pipeline_info = f"Full: {W}x{H}\nTile: {len(tiles)} -> {effective_tile_width}x{effective_tile_height}\nOverlap: {overlap}\nFeatherRate: {overlap_feather_rate}\nMaxPixelsPerTile: {max_pixels_per_tile}M\nAdaptable: {adaptable_tile_size}\nMaxDeviationRatio: {adaptable_max_deviation_ratio}\nMaxAspectRatio: {adaptable_max_aspect_ratio}\nPixelAlignment: {pixel_alignment}"
+        print(upscaled_pipeline_info)
         return io.NodeOutput(cropped_tiles, pipeline, upscaled_pipeline_info)    
     
 # ==========================================
