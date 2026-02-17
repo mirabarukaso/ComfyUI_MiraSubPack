@@ -45,13 +45,14 @@ class MiraITUPipelineExtract(io.ComfyNode):
                 io.Int.Output(display_name="tile_height"),
                 io.Int.Output(display_name="overlap"),
                 io.Float.Output(display_name="overlap_feather_rate"),
+                io.Int.Output(display_name="pixel_alignment"),
             ],
         )
     
     @classmethod
     def execute(cls, mira_itu_pipeline) -> io.NodeOutput:
-        (full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate) = mira_itu_pipeline
-        return io.NodeOutput(full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate)
+        (full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate, pixel_alignment) = mira_itu_pipeline
+        return io.NodeOutput(full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate, pixel_alignment)
     
 class MiraITUPipelineCombine(io.ComfyNode):
     """
@@ -71,6 +72,7 @@ class MiraITUPipelineCombine(io.ComfyNode):
                 io.Int.Input("tile_height", optional=False, tooltip="Tile height."),
                 io.Int.Input("overlap", optional=False, tooltip="Overlap pixels."),
                 io.Float.Input("overlap_feather_rate", optional=False, tooltip="Overlap feather rate."),
+                io.Int.Input("pixel_alignment", optional=False, tooltip="Pixel alignment for tile calculations."),
             ],
             outputs=[
                 MiraITUPipeline.Output(display_name="mira_itu_pipeline"),
@@ -78,8 +80,8 @@ class MiraITUPipelineCombine(io.ComfyNode):
         )
     
     @classmethod
-    def execute(cls, full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate) -> io.NodeOutput:
-        return io.NodeOutput((full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate))
+    def execute(cls, full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate, pixel_alignment) -> io.NodeOutput:
+        return io.NodeOutput((full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate, pixel_alignment))
 
 # ==========================================
 # Common Helper
@@ -454,8 +456,8 @@ class OverlappedLatentMerge(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, tiled_latents, mira_itu_pipeline, feather_rate_override, pixel_alignment) -> io.NodeOutput:
-        (full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate) = mira_itu_pipeline
+    def execute(cls, tiled_latents, mira_itu_pipeline, feather_rate_override) -> io.NodeOutput:
+        (full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate, pixel_alignment) = mira_itu_pipeline
         if round(feather_rate_override,2) != 0:
             print(f"[MiraSubPack:OverlappedImageMerge] Override feather_rate to {feather_rate_override} ")
             overlap_feather_rate = feather_rate_override
@@ -574,8 +576,8 @@ class OverlappedImageMerge(io.ComfyNode):
         )
         
     @classmethod
-    def execute(cls, tiled_images, mira_itu_pipeline, feather_rate_override, pixel_alignment) -> io.NodeOutput:
-        (full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate) = mira_itu_pipeline
+    def execute(cls, tiled_images, mira_itu_pipeline, feather_rate_override) -> io.NodeOutput:
+        (full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate, pixel_alignment) = mira_itu_pipeline
         if round(feather_rate_override,2) != 0:
             print(f"[MiraSubPack:OverlappedImageMerge] Override feather_rate to {feather_rate_override} ")
             overlap_feather_rate = feather_rate_override
@@ -711,9 +713,9 @@ class ImageCropTiles(io.ComfyNode):
             tile_list.append(tile_img)
 
         cropped_tiles = torch.stack(tile_list, dim=0)
-        pipeline = (W, H, effective_tile_width, effective_tile_height, overlap, overlap_feather_rate)
-        upscaled_pipeline_info = f"Full: {W}x{H}\nTile: {len(tiles)} -> {effective_tile_width}x{effective_tile_height}\nOverlap: {overlap}\nFeatherRate: {overlap_feather_rate}\nOriginalTileSize: {tile_size}"
-        return io.NodeOutput(cropped_tiles, pipeline, upscaled_pipeline_info, upscaled_pipeline_info)    
+        pipeline = (W, H, effective_tile_width, effective_tile_height, overlap, overlap_feather_rate, pixel_alignment)
+        upscaled_pipeline_info = f"Full: {W}x{H}\nTile: {len(tiles)} -> {effective_tile_width}x{effective_tile_height}\nOverlap: {overlap}\nFeatherRate: {overlap_feather_rate}\nOriginalTileSize: {tile_size}\nAdaptable: {adaptable_tile_size}\nMaxDeviationRatio: {adaptable_max_deviation_ratio}\nMaxAspectRatio: {adaptable_max_aspect_ratio}\nPixelAlignment: {pixel_alignment}"
+        return io.NodeOutput(cropped_tiles, pipeline, upscaled_pipeline_info)    
 
 class ImageCropTilesByPixels(io.ComfyNode):
     """
@@ -789,9 +791,9 @@ class ImageCropTilesByPixels(io.ComfyNode):
             tile_list.append(tile_img)
 
         cropped_tiles = torch.stack(tile_list, dim=0)
-        pipeline = (W, H, effective_tile_width, effective_tile_height, overlap, overlap_feather_rate)
-        upscaled_pipeline_info = f"Full: {W}x{H}\nTile: {len(tiles)} -> {effective_tile_width}x{effective_tile_height}\nOverlap: {overlap}\nFeatherRate: {overlap_feather_rate}\nMaxPixelsPerTile: {max_pixels_per_tile}M"
-        return io.NodeOutput(cropped_tiles, pipeline, upscaled_pipeline_info, upscaled_pipeline_info)    
+        pipeline = (W, H, effective_tile_width, effective_tile_height, overlap, overlap_feather_rate, pixel_alignment)
+        upscaled_pipeline_info = f"Full: {W}x{H}\nTile: {len(tiles)} -> {effective_tile_width}x{effective_tile_height}\nOverlap: {overlap}\nFeatherRate: {overlap_feather_rate}\nMaxPixelsPerTile: {max_pixels_per_tile}M\nAdaptable: {adaptable_tile_size}\nMaxDeviationRatio: {adaptable_max_deviation_ratio}\nMaxAspectRatio: {adaptable_max_aspect_ratio}\nPixelAlignment: {pixel_alignment}"
+        return io.NodeOutput(cropped_tiles, pipeline, upscaled_pipeline_info)    
     
 # ==========================================
 # Latent Crop Utilities
@@ -964,8 +966,8 @@ class LatentUpscaleAndCropTiles(io.ComfyNode):
         print(f"  Tiled latents shape: {tiled_latents.shape}")
         print(f"  Ready for OverlappedLatentMerge with full_size={new_width}x{new_height}")
         
-        pipeline = (new_width, new_height, effective_tile_width, effective_tile_height, overlap, overlap_feather_rate)
-        upscaled_pipeline_info = f"Full: {new_width}x{new_height}\nTile: {len(tiles)} -> {effective_tile_width}x{effective_tile_height}\nOverlap: {overlap}\nFeatherRate: {overlap_feather_rate}\nOriginalTileSize: {tile_size}"
+        pipeline = (new_width, new_height, effective_tile_width, effective_tile_height, overlap, overlap_feather_rate, pixel_alignment)
+        upscaled_pipeline_info = f"Full: {new_width}x{new_height}\nTile: {len(tiles)} -> {effective_tile_width}x{effective_tile_height}\nOverlap: {overlap}\nFeatherRate: {overlap_feather_rate}\nOriginalTileSize: {tile_size}\nPixelAlignment: {pixel_alignment}"
         
         return io.NodeOutput({"samples": tiled_latents}, {"samples": upscaled_latent.unsqueeze(0)}, pipeline, upscaled_pipeline_info, tile_size, orig_width, orig_height)
     
