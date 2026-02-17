@@ -352,29 +352,32 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
         batch_latents = tiled_samples["samples"]
         print(f"[MiraSubPack:AutoTiledTagger] Using {len(batch_latents)} tiles.")
         print(f"[MiraSubPack:AutoTiledTagger] tagger_text (for copy to SAA)\n{tagger_text}")
-                
+        
+        if ref_latents is not None:
+            print("    >Using provided reference latents for this tile.")
+                            
         # Parse tagger text mapping
         mapping = tagger_text.splitlines()
         tile_latents = None
-        for idx in range(len(batch_latents)):
-            # Dynamic prompt construction
-            dynamic_prompt = common_positive
-            tags_str = ""
-            if idx < len(mapping):
-                tags_str = mapping[idx].replace('(', r'\(').replace(')', r'\)')
-                dynamic_prompt = f"{common_positive}, {tags_str}" if common_positive else tags_str
-            
-            single_latent = batch_latents[idx].unsqueeze(0)  # [C, H, W] -> [1, C, H, W]
-            
-            print(f"  > Sampling Tile {idx+1}/{len(batch_latents)}: {single_latent.shape[3]}x{single_latent.shape[2]}")
-            print(f"    Tags: {tags_str}")
-            positive_tokens = clip.tokenize(dynamic_prompt)
-            positive_conditioning = clip.encode_from_tokens_scheduled(positive_tokens)            
+        for idx in range(len(batch_latents)):                    
+            if tagger_text != "":
+                # Dynamic prompt construction
+                dynamic_prompt = common_positive
+                tags_str = ""
+                if idx < len(mapping):
+                    tags_str = mapping[idx].replace('(', r'\(').replace(')', r'\)')
+                    dynamic_prompt = f"{common_positive}, {tags_str}" if common_positive else tags_str
+                                
+                print(f"    Tags: {tags_str}")
+                positive_tokens = clip.tokenize(dynamic_prompt)
+                positive_conditioning = clip.encode_from_tokens_scheduled(positive_tokens)
+            else:
+                positive_tokens = clip.tokenize(common_positive)
+                positive_conditioning = clip.encode_from_tokens_scheduled(positive_tokens)
             
             if ref_latents is not None:
-                all_ref_latent = ref_latents["samples"]
-                print("    Using provided reference latents for this tile.")                
-                ref_latent = all_ref_latent[idx].unsqueeze(0)                
+                all_ref_latent = ref_latents["samples"]                
+                ref_latent = all_ref_latent[idx].unsqueeze(0)                                                
                 
                 if clip_negative:
                     negative_tokens = clip_negative.tokenize(common_negative)
@@ -382,17 +385,16 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
                 else:
                     negative_tokens = clip.tokenize(common_negative)
                     negative_conditioning = clip.encode_from_tokens_scheduled(negative_tokens)
-                    
-                print("    Applying reference latent injection. (Works with Flux.2)")
+                                    
                 positive_conditioning = node_helpers.conditioning_set_values(positive_conditioning, {"reference_latents": [ref_latent]}, append=True)
                 negative_conditioning = node_helpers.conditioning_set_values(negative_conditioning, {"reference_latents": [ref_latent]}, append=True)
-                
+                                
                 del positive_tokens
                 del negative_tokens
-                torch.cuda.empty_cache()
-            else:
-                del positive_tokens
+                torch.cuda.empty_cache()                        
             
+            single_latent = batch_latents[idx].unsqueeze(0)  # [C, H, W] -> [1, C, H, W]                
+            print(f"  > Sampling Tile {idx+1}/{len(batch_latents)}: {single_latent.shape[3]}x{single_latent.shape[2]}")
             print(f"    Tile latent shape: {single_latent.shape}")
             sampled_tile = cls._sample_single(
                 model, positive_conditioning, negative_conditioning, {"samples": single_latent},
@@ -698,6 +700,18 @@ class ImageCropTiles(io.ComfyNode):
         source = image[0]
         H, W, _ = source.shape
 
+        # Input validation
+        if tile_size <= overlap:
+            print(f"[MiraSubPack:ImageCropTiles] ⚠ Warning: tile_size ({tile_size}) must be larger than overlap ({overlap})")
+            tile_size = overlap + pixel_alignment
+            print(f"  Auto-adjusted tile_size to {tile_size}")
+        
+        if W < pixel_alignment or H < pixel_alignment:
+            raise ValueError(f"Image dimensions ({W}x{H}) are too small for pixel_alignment ({pixel_alignment})")
+
+        print(f"[MiraSubPack:ImageCropTiles] Processing image: {W}x{H}")
+        print(f"  Tile size: {tile_size}, Overlap: {overlap}, Pixel alignment: {pixel_alignment}")
+
         effective_tile_width, effective_tile_height = tile_size, tile_size
         if adaptable_tile_size:
             value = int(round(tile_size * adaptable_max_deviation_ratio))
@@ -760,15 +774,25 @@ class ImageCropTilesByPixels(io.ComfyNode):
         source = image[0]
         H, W, _ = source.shape
 
+        # Input validation
+        if W < pixel_alignment or H < pixel_alignment:
+            raise ValueError(f"Image dimensions ({W}x{H}) are too small for pixel_alignment ({pixel_alignment})")
+
         # Convert megapixels to pixels (1.0M = 1048576 pixels)
         max_pixels_value = int(max_pixels_per_tile * 1048576)
         
         # Calculate base tile size from max pixels
         # Start with assumption of square tiles
         base_tile_size = int(math.sqrt(max_pixels_value))
-        # Align to 8px
+        # Align to pixel_alignment
         base_tile_size = (base_tile_size // pixel_alignment) * pixel_alignment
-        base_tile_size = max(64, base_tile_size)  # Minimum 64 pixels
+        base_tile_size = max(pixel_alignment * 8, base_tile_size)  # Minimum 8x pixel_alignment
+        
+        # Ensure tile_size is larger than overlap
+        if base_tile_size <= overlap:
+            print(f"[MiraSubPack:ImageCropTilesByPixels] ⚠ Warning: calculated tile_size ({base_tile_size}) must be larger than overlap ({overlap})")
+            base_tile_size = overlap + pixel_alignment
+            print(f"  Auto-adjusted tile_size to {base_tile_size}")
         
         actual_pixels = base_tile_size * base_tile_size
         print(f"[MiraSubPack:ImageCropTilesByPixels] Calculated base tile size: {base_tile_size}x{base_tile_size}")
@@ -796,180 +820,220 @@ class ImageCropTilesByPixels(io.ComfyNode):
         return io.NodeOutput(cropped_tiles, pipeline, upscaled_pipeline_info)    
     
 # ==========================================
-# Latent Crop Utilities
+# Latent Crop Utilities - Optimized Version
 # ==========================================    
 class LatentUpscaleAndCropTiles(io.ComfyNode):
     """
-    Advanced latent upscaler that outputs tiled latents for OverlappedLatentMerge.
-    Upscales input latent and splits it into overlapping tiles.
+    Advanced latent upscaler using Bislerp (Hybrid Interpolation) and Variance Matching.
+    Outputs tiled latents compatible with OverlappedLatentMerge.
     """
     @classmethod
     def define_schema(cls):
         return io.Schema(
             node_id="LatentUpscaleAndCropTiles_MiraSubPack",
-            display_name="Latent Upscale then Crop to Tiles",
+            display_name="Latent Upscale then Crop to Tiles (Advanced)",
             category=CAT,
-            description="Upscale latent and split into overlapping tiles for further processing.",
+            description="Upscales latents with statistical correction and splits them into overlapping tiles.",
             inputs=[
                 io.Latent.Input("latent", optional=False, tooltip="Input latent to upscale and tile."),
-                io.Float.Input("scale_factor", default=1.25, min=0.5, max=8.0, step=0.05,
-                              tooltip="Upscaling factor (e.g., 2.0 = double size)."),
-                io.Combo.Input("upscale_method", default="nearest",
-                              options=["nearest", "bilinear", "bicubic", "area", "nearest-exact"],
-                              tooltip="Interpolation method for upscaling."),
-                io.Boolean.Input("multi_stage", default=True,
-                                tooltip="Use multi-stage upscaling for factors > 2.0 (smoother results)."),
-                io.Float.Input("noise_strength", default=0.0, min=0.0, max=1.0, step=0.01,
-                              tooltip="Add noise to upscaled latent (helps with detail generation)."),
-                io.Int.Input("seed", default=0, min=0, max=0xffffffffffffffff,
-                            tooltip="Seed for noise generation."),
-                io.Int.Input("tile_size", default=1024, min=512, max=4096, step=64,
-                            tooltip="Size of each tile in pixels (will be converted to latent space)."),
-                io.Int.Input("overlap", default=64, min=64, max=256, step=64,
-                            tooltip="Overlap between tiles in pixels."),
-                io.Float.Input("overlap_feather_rate", default=1.0, min=0.1, max=4.0, step=0.1, 
-                               tooltip="Feathering rate multiplier."),
+                io.Float.Input("scale_factor", default=1.25, min=0.5, max=8.0, step=0.05),
+                io.Combo.Input("upscale_method", default="bislerp", 
+                               options=["bislerp", "nearest-exact", "bilinear", "bicubic", "area"],
+                               tooltip="Method for upscaling. 'bislerp' combines nearest-exact and bicubic for best results."),
+                io.Float.Input("bislerp_strength", default=0.35, min=0.0, max=1.0, step=0.05, 
+                               tooltip="Weight of nearest-exact vs bicubic. Higher is sharper."),
+                io.Boolean.Input("variance_matching", default=True, 
+                                 tooltip="Maintains latent distribution to prevent color/contrast drift."),
+                io.Boolean.Input("multi_stage", default=True, tooltip="Iterative upscaling for factors > 2.0."),
+                io.Float.Input("noise_strength", default=0.0, min=0.0, max=1.0, step=0.01),
+                io.Int.Input("seed", default=0, min=0, max=0xffffffffffffffff),
+                io.Int.Input("tile_size", default=1024, min=512, max=4096, step=64),
+                io.Int.Input("overlap", default=64, min=64, max=256, step=64),
+                io.Float.Input("overlap_feather_rate", default=1.0, min=0.1, max=4.0, step=0.1),
                 io.Boolean.Input("adaptable_tile_size", default=True),
-                io.Float.Input("adaptable_max_deviation_ratio", default=0.25, min=0.1, max=0.5, step=0.05),
-                io.Float.Input("adaptable_max_aspect_ratio", default=1.33, min=1.0, max=2.0, step=0.01, 
-                               tooltip="Max aspect ratio (W/H or H/W) for adaptable tile sizing.\n5:4=1.25, 4:3=1.33, 16:9=1.78, 21:9=2.33."),
-                io.Int.Input("pixel_alignment", default=8, min=8, max=256, step=8, tooltip="Align tile dimensions to multiples of this value (e.g., 8 for SDXL, 16 for FLUX.2)."   ),
+                io.Float.Input("adaptable_max_deviation_ratio", default=0.25, step=0.05),
+                io.Float.Input("adaptable_max_aspect_ratio", default=1.33, step=0.01),
+                io.Int.Input("pixel_alignment", default=8, tooltip="8 for SD1.5/SDXL, 16 for FLUX."),
             ],
             outputs=[
                 io.Latent.Output(display_name="tiled_latents"),
                 io.Latent.Output(display_name="full_latent"),
+                io.Latent.Output(display_name="original_tiled_latents"),
                 MiraITUPipeline.Output(),
                 io.String.Output(display_name="mira_itu_pipeline_info"),
-                
-                
                 io.Int.Output(display_name="original_tile_size"),
                 io.Int.Output(display_name="original_width"),
                 io.Int.Output(display_name="original_height"),                
             ],
             is_output_node=True
         )
-    
-    @classmethod
-    def execute(cls, latent, scale_factor, upscale_method, multi_stage, 
-                noise_strength, seed, tile_size, overlap, overlap_feather_rate, 
-                adaptable_tile_size, adaptable_max_deviation_ratio=0.25, adaptable_max_aspect_ratio=1.33, pixel_alignment=8) -> io.NodeOutput:
-        """
-        Upscale latent and split into tiles for OverlappedLatentMerge.
+
+    def _apply_upscale(self, samples, target_h, target_w, method, bislerp_strength, apply_vm, orig_std, orig_mean):
+        """Internal helper for high-quality latent upscaling."""
+        if method == "bislerp":
+            # Hybrid interpolation: Mix Nearest-Exact for structure and Bicubic for smoothness
+            s1 = torch.nn.functional.interpolate(samples, size=(target_h, target_w), mode="nearest-exact")
+            s2 = torch.nn.functional.interpolate(samples, size=(target_h, target_w), mode="bicubic", align_corners=False)
+            upscaled = s1 * bislerp_strength + s2 * (1.0 - bislerp_strength)
+        else:
+            align = False if method in ["bilinear", "bicubic"] else None
+            upscaled = torch.nn.functional.interpolate(samples, size=(target_h, target_w), mode=method, align_corners=align)
+
+        if apply_vm:
+            # Variance Matching: Corrects the flattening effect of interpolation
+            # to maintain original contrast and texture energy
+            current_std = upscaled.std()
+            current_mean = upscaled.mean()
+            if current_std > 1e-6:
+                upscaled = (upscaled - current_mean) * (orig_std / current_std) + orig_mean
         
-        Returns tiled latents in batch format [N, C, H, W] where N is number of tiles.
-        """
+        return upscaled
+
+    @classmethod
+    def execute(cls, latent, scale_factor, upscale_method, bislerp_strength, variance_matching, multi_stage, 
+                noise_strength, seed, tile_size, overlap, overlap_feather_rate, 
+                adaptable_tile_size, adaptable_max_deviation_ratio, adaptable_max_aspect_ratio, pixel_alignment) -> io.NodeOutput:
+        
         samples = latent["samples"]
         B, C, latent_h, latent_w = samples.shape
+        device = samples.device
         
-        # Original dimensions in pixel space
-        orig_width = latent_w * pixel_alignment
-        orig_height = latent_h * pixel_alignment
+        # Calculate target dimensions in pixel space with strict alignment
+        orig_width_px = latent_w * pixel_alignment
+        orig_height_px = latent_h * pixel_alignment
         
-        # Calculate target dimensions
-        new_width = int(orig_width * scale_factor)
-        new_height = int(orig_height * scale_factor)
+        # Calculate ideal target dimensions
+        ideal_width_px = orig_width_px * scale_factor
+        ideal_height_px = orig_height_px * scale_factor
         
-        # Align to 8px
-        new_width = (new_width // pixel_alignment) * pixel_alignment
-        new_height = (new_height // pixel_alignment) * pixel_alignment
-        new_width = max(pixel_alignment, new_width)
-        new_height = max(pixel_alignment, new_height)
+        # Align to pixel_alignment grid
+        target_width_px = max(pixel_alignment, (int(ideal_width_px) // pixel_alignment) * pixel_alignment)
+        target_height_px = max(pixel_alignment, (int(ideal_height_px) // pixel_alignment) * pixel_alignment)
         
-        new_latent_w = new_width // pixel_alignment
-        new_latent_h = new_height // pixel_alignment
+        # Calculate actual scale factors after alignment
+        actual_scale_w = target_width_px / orig_width_px
+        actual_scale_h = target_height_px / orig_height_px
+        actual_scale_factor = (actual_scale_w + actual_scale_h) / 2
         
-        print("[MiraSubPack:LatentUpscalerAdvanced] Upscaling latent:")
-        print(f"  Original: {orig_width}x{orig_height} ({latent_w}x{latent_h} latent)")
-        print(f"  Target: {new_width}x{new_height} ({new_latent_w}x{new_latent_h} latent)")
-        print(f"  Scale: {scale_factor:.3f}x")
-        print(f"  Method: {upscale_method}")
+        # Warn if scale factor was adjusted significantly
+        scale_diff = abs(actual_scale_factor - scale_factor)
+        if scale_diff > 0.01:  # More than 1% difference
+            print("[MiraSubPack:LatentUpscaleAndCropTiles] ⚠ Scale factor adjusted for pixel alignment:")
+            print(f"  Requested: {scale_factor:.4f}x")
+            print(f"  Actual: {actual_scale_factor:.4f}x (W: {actual_scale_w:.4f}x, H: {actual_scale_h:.4f}x)")
+            print(f"  Original: {orig_width_px}x{orig_height_px} → Target: {target_width_px}x{target_height_px}")
+            print(f"  Pixel alignment: {pixel_alignment}")
         
-        # Perform upscaling
-        current_samples = samples
+        target_latent_w = target_width_px // pixel_alignment
+        target_latent_h = target_height_px // pixel_alignment
+
+        # Store original stats for Variance Matching
+        orig_std, orig_mean = samples.std(), samples.mean()
         
-        if multi_stage and scale_factor >= 2.0:
-            # Multi-stage upscaling
-            stages = []
+        current_samples = samples.clone()        
+        
+        # --- Upscaling Logic ---
+        if multi_stage and scale_factor > 2.0:
             remaining_scale = scale_factor
-            
-            while remaining_scale >= 2.0:
-                stages.append(2.0)
-                remaining_scale /= 2.0
-            
-            if remaining_scale > 1.0:
-                stages.append(remaining_scale)
-            
-            print(f"  Multi-stage: {len(stages)} stages {stages}")
-            
-            for i, stage_scale in enumerate(stages):
-                current_h = current_samples.shape[2]
-                current_w = current_samples.shape[3]
-                stage_h = int(current_h * stage_scale)
-                stage_w = int(current_w * stage_scale)
+            while remaining_scale > 1.0:
+                # Step by 2.0x or the final remaining fraction
+                step_scale = 2.0 if remaining_scale >= 2.0 else remaining_scale
+                remaining_scale /= step_scale
                 
-                current_samples = torch.nn.functional.interpolate(
-                    current_samples,
-                    size=(stage_h, stage_w),
-                    mode=upscale_method,
-                    align_corners=False if upscale_method in ["bilinear", "bicubic"] else None
-                )
+                is_last = remaining_scale <= 1.0
+                step_h = target_latent_h if is_last else int(current_samples.shape[2] * step_scale)
+                step_w = target_latent_w if is_last else int(current_samples.shape[3] * step_scale)
                 
-                print(f"    Stage {i+1}: {current_h}x{current_w} -> {stage_h}x{stage_w}")
+                current_samples = cls()._apply_upscale(current_samples, step_h, step_w, upscale_method, 
+                                                      bislerp_strength, variance_matching, orig_std, orig_mean)
+                if is_last: break
         else:
-            # Single-stage upscaling
-            current_samples = torch.nn.functional.interpolate(
-                current_samples,
-                size=(new_latent_h, new_latent_w),
-                mode=upscale_method,
-                align_corners=False if upscale_method in ["bilinear", "bicubic"] else None
+            current_samples = cls()._apply_upscale(current_samples, target_latent_h, target_latent_w, upscale_method, 
+                                                  bislerp_strength, variance_matching, orig_std, orig_mean)
+
+        # --- Noise Injection (Using Lerp for energy conservation) ---
+        if noise_strength > 0:
+            generator = torch.manual_seed(seed)
+            noise = torch.randn(current_samples.shape, dtype=current_samples.dtype, device=device, generator=generator)
+            # Mix noise instead of raw addition to prevent variance explosion
+            current_samples = torch.lerp(current_samples, noise, noise_strength * 0.2)
+
+        # --- Tiling Logic (Batch-Safe) ---
+        eff_tile_w, eff_tile_h = tile_size, tile_size
+        if adaptable_tile_size:
+            max_dev = (int(tile_size * adaptable_max_deviation_ratio) // pixel_alignment) * pixel_alignment
+            eff_tile_w, eff_tile_h = TileHelper._find_optimal_tile_size(
+                target_width_px, target_height_px, tile_size, overlap, max_dev, adaptable_max_aspect_ratio, pixel_alignment
             )
         
-        # Add noise if requested
-        if noise_strength > 0:
-            noise = torch.randn(current_samples.shape, dtype=current_samples.dtype, device=current_samples.device, generator=torch.manual_seed(seed+1))
-            current_samples = current_samples + noise * noise_strength
-            print(f"  Added noise: strength={noise_strength:.3f}, seed={seed}")
+        tile_coords = TileHelper._calculate_tiles(target_width_px, target_height_px, eff_tile_w, eff_tile_h, overlap, pixel_alignment)
         
-        # Now split the upscaled latent into tiles
-        upscaled_latent = current_samples[0]  # [C, H, W]
+        all_tiles = []
+        for b in range(B):
+            single_latent = current_samples[b]
+            for x, y, w, h in tile_coords:
+                lx, ly = int(x // pixel_alignment), int(y // pixel_alignment)
+                lw, lh = int(w // pixel_alignment), int(h // pixel_alignment)
+                # Crop with boundary safety
+                tile = single_latent[:, ly:min(ly+lh, target_latent_h), lx:min(lx+lw, target_latent_w)].clone()
+                all_tiles.append(tile)
+
+        tiled_output = torch.stack(all_tiles, dim=0)
         
-        effective_tile_width, effective_tile_height = tile_size, tile_size
-        if adaptable_tile_size:
-            value = int(round(tile_size * adaptable_max_deviation_ratio))
-            adaptable_max_deviation = (value // pixel_alignment) * pixel_alignment
-            print(f"[MiraSubPack:ImageCropTiles] adaptable_max_deviation set to {adaptable_max_deviation} pixels.")
-            effective_tile_width, effective_tile_height = TileHelper._find_optimal_tile_size(new_width, new_height, tile_size, overlap, adaptable_max_deviation, adaptable_max_aspect_ratio, pixel_alignment)
+        # --- Crop original-size latent with same tiling scheme ---
+        # Directly calculate original tile coordinates by dividing upscaled coordinates by actual scale factor
+        # This ensures the same number of tiles and matching positions
+        print("[MiraSubPack:LatentUpscaleAndCropTiles] Cropping original latent with same tile scheme for reference...")
+        print(f"  Original latent size: {latent_w}x{latent_h} (pixels: {orig_width_px}x{orig_height_px})")
         
-        # Calculate tile positions in pixel space
-        tiles = TileHelper._calculate_tiles(new_width, new_height, effective_tile_width, effective_tile_height, overlap, pixel_alignment)
+        original_tile_coords = []
+        for x, y, w, h in tile_coords:
+            # Scale down coordinates and dimensions using actual scale factors
+            orig_x = int(x / actual_scale_w)
+            orig_y = int(y / actual_scale_h)
+            orig_w = int(w / actual_scale_w)
+            orig_h = int(h / actual_scale_h)
+            # Align to pixel_alignment grid
+            orig_x = (orig_x // pixel_alignment) * pixel_alignment
+            orig_y = (orig_y // pixel_alignment) * pixel_alignment
+            orig_w = (orig_w // pixel_alignment) * pixel_alignment
+            orig_h = (orig_h // pixel_alignment) * pixel_alignment
+            # Ensure coordinates don't exceed original image boundaries
+            orig_x = min(orig_x, orig_width_px - pixel_alignment)
+            orig_y = min(orig_y, orig_height_px - pixel_alignment)
+            # Ensure dimensions are valid and within bounds
+            orig_w = max(pixel_alignment, min(orig_w, orig_width_px - orig_x))
+            orig_h = max(pixel_alignment, min(orig_h, orig_height_px - orig_y))
+            original_tile_coords.append((orig_x, orig_y, orig_w, orig_h))
         
-        print(f"[MiraSubPack:LatentUpscalerAdvanced] Splitting into {len(tiles)} tiles:")
-        print(f"  Tile size: {effective_tile_width}x{effective_tile_height}px, Overlap: {overlap}px")
+        print(f"  Original tile count: {len(original_tile_coords)} (same as upscaled: {len(tile_coords)})")
+        print(f"  Original tile size range: {min(w for _,_,w,_ in original_tile_coords)}~{max(w for _,_,w,_ in original_tile_coords)} x {min(h for _,_,_,h in original_tile_coords)}~{max(h for _,_,_,h in original_tile_coords)}")
+        print(f"  Original tile coordinates (x, y, w, h): {original_tile_coords[:5]}...")  # Print first 5 for brevity
         
-        # Crop tiles from upscaled latent
-        tile_list = []
-        for idx, (x, y, w, h) in enumerate(tiles):
-            # Convert to latent space coordinates
-            lx, ly = x // pixel_alignment, y // pixel_alignment
-            lw, lh = w // pixel_alignment, h // pixel_alignment
-            
-            # Crop tile from upscaled latent
-            tile_latent = upscaled_latent[:, ly:ly+lh, lx:lx+lw].clone()
-            tile_list.append(tile_latent)
-            
-            print(f"  Tile {idx+1}: position=({x},{y}) size={w}x{h} latent_size={lw}x{lh}")
+        original_all_tiles = []
+        orignial_samples = samples.clone()
+        for b in range(B):
+            single_latent = orignial_samples[b]
+            for x, y, w, h in original_tile_coords:
+                lx, ly = int(x // pixel_alignment), int(y // pixel_alignment)
+                lw, lh = int(w // pixel_alignment), int(h // pixel_alignment)
+                # Crop with boundary safety
+                tile = single_latent[:, ly:min(ly+lh, latent_h), lx:min(lx+lw, latent_w)].clone()
+                original_all_tiles.append(tile)
         
-        # Stack tiles into batch format [N, C, H, W]
-        tiled_latents = torch.stack(tile_list, dim=0)
+        original_tiled_output = torch.stack(original_all_tiles, dim=0) if original_all_tiles else samples
         
-        print("[MiraSubPack:LatentUpscalerAdvanced] Output:")
-        print(f"  Tiled latents shape: {tiled_latents.shape}")
-        print(f"  Ready for OverlappedLatentMerge with full_size={new_width}x{new_height}")
-        
-        pipeline = (new_width, new_height, effective_tile_width, effective_tile_height, overlap, overlap_feather_rate, pixel_alignment)
-        upscaled_pipeline_info = f"Full: {new_width}x{new_height}\nTile: {len(tiles)} -> {effective_tile_width}x{effective_tile_height}\nOverlap: {overlap}\nFeatherRate: {overlap_feather_rate}\nOriginalTileSize: {tile_size}\nPixelAlignment: {pixel_alignment}"
-        
-        return io.NodeOutput({"samples": tiled_latents}, {"samples": upscaled_latent.unsqueeze(0)}, pipeline, upscaled_pipeline_info, tile_size, orig_width, orig_height)
+        # Metadata and Pipeline Info
+        pipeline = (target_width_px, target_height_px, eff_tile_w, eff_tile_h, overlap, overlap_feather_rate, pixel_alignment)
+        upscaled_pipeline_info = f"Full: {target_width_px}x{target_height_px}\nTile: {len(all_tiles)} -> {eff_tile_w}x{eff_tile_h}\nOverlap: {overlap}\nFeatherRate: {overlap_feather_rate}\nOriginalTileSize: {tile_size}\nPixelAlignment: {pixel_alignment}"
+        info = f"{upscaled_pipeline_info}\n\nScale: {actual_scale_factor:.4f}x (requested: {scale_factor}x)\nMethod: {upscale_method}\nTiles: {len(tile_coords)} per batch\nSize: {eff_tile_w}x{eff_tile_h}"
+
+        return io.NodeOutput(
+            {"samples": tiled_output}, 
+            {"samples": current_samples}, 
+            {"samples": original_tiled_output},
+            pipeline, info, tile_size, orig_width_px, orig_height_px
+        )
     
 class LatentUpscaleSimple(io.ComfyNode):
     """
@@ -1015,15 +1079,29 @@ class LatentUpscaleSimple(io.ComfyNode):
         orig_width = latent_w * pixel_alignment
         orig_height = latent_h * pixel_alignment
         
-        # Calculate target dimensions
-        new_width = int(orig_width * scale_factor)
-        new_height = int(orig_height * scale_factor)
+        # Calculate ideal target dimensions
+        ideal_width = orig_width * scale_factor
+        ideal_height = orig_height * scale_factor
         
         # Align to pixel_alignment
-        new_width = (new_width // pixel_alignment) * pixel_alignment
-        new_height = (new_height // pixel_alignment) * pixel_alignment
+        new_width = (int(ideal_width) // pixel_alignment) * pixel_alignment
+        new_height = (int(ideal_height) // pixel_alignment) * pixel_alignment
         new_width = max(pixel_alignment, new_width)
         new_height = max(pixel_alignment, new_height)
+        
+        # Calculate actual scale factors after alignment
+        actual_scale_w = new_width / orig_width
+        actual_scale_h = new_height / orig_height
+        actual_scale_factor = (actual_scale_w + actual_scale_h) / 2
+        
+        # Warn if scale factor was adjusted significantly
+        scale_diff = abs(actual_scale_factor - scale_factor)
+        if scale_diff > 0.01:  # More than 1% difference
+            print("[MiraSubPack:LatentUpscaleSimple] ⚠ Scale factor adjusted for pixel alignment:")
+            print(f"  Requested: {scale_factor:.4f}x")
+            print(f"  Actual: {actual_scale_factor:.4f}x (W: {actual_scale_w:.4f}x, H: {actual_scale_h:.4f}x)")
+            print(f"  Original: {orig_width}x{orig_height} → Target: {new_width}x{new_height}")
+            print(f"  Pixel alignment: {pixel_alignment}")
         
         new_latent_w = new_width // pixel_alignment
         new_latent_h = new_height // pixel_alignment
@@ -1031,7 +1109,7 @@ class LatentUpscaleSimple(io.ComfyNode):
         print("[MiraSubPack:LatentUpscalerAdvanced] Upscaling latent:")
         print(f"  Original: {orig_width}x{orig_height} ({latent_w}x{latent_h} latent)")
         print(f"  Target: {new_width}x{new_height} ({new_latent_w}x{new_latent_h} latent)")
-        print(f"  Scale: {scale_factor:.3f}x")
+        print(f"  Scale: {actual_scale_factor:.3f}x")
         print(f"  Method: {upscale_method}")
         
         # Perform upscaling
