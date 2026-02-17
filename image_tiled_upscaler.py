@@ -373,6 +373,9 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
             positive_tokens = clip.tokenize(dynamic_prompt)
             positive_conditioning = clip.encode_from_tokens_scheduled(positive_tokens)
             
+            del positive_tokens
+            del negative_tokens
+            
             if not_sdxl and ref_latents is not None:
                 all_ref_latent = ref_latents["samples"]
                 print("    Using provided reference latents for this tile.")                
@@ -400,7 +403,7 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
             )            
             tile_latents = torch.cat([tile_latents, sampled_tile["samples"]], dim=0) if tile_latents is not None else sampled_tile["samples"]
             
-            if not_sdxl:
+            if not_sdxl and ref_latents is not None:
                 del positive_conditioning
                 del negative_conditioning
                 
