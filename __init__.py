@@ -2,7 +2,7 @@ from .JoyCaption.beta_one import JoyCaptionNodeBetaOne, JoyCaptionBetaOneSimpleN
 from .QwenImage.nodes_qwen import TextEncodeQwenImageEditMod, TextEncodeQwenImageEditPlusMod 
 from .image_util import ImageMergeByPixelAlign
 from .image_tiled_upscaler import MiraITUPipelineExtract, MiraITUPipelineCombine, ImageTiledKSamplerWithTagger, OverlappedImageMerge, OverlappedLatentMerge, \
-    ImageCropTiles, ImageCropTilesByPixels, LatentUpscaleAndCropTiles, LatentUpscaleSimple
+    TiledImageColorCorrection, ImageCropTiles, ImageCropTilesByPixels, LatentUpscaleAndCropTiles, LatentUpscaleSimple
 from .utils import VAEEncode_Mira, VAEDecode_Mira
 
 
@@ -23,6 +23,7 @@ NODE_CLASS_MAPPINGS = {
     "ImageTiledKSamplerWithTagger_MiraSubPack": ImageTiledKSamplerWithTagger,
     "OverlappedImageMerge_MiraSubPack": OverlappedImageMerge,
     "OverlappedLatentMerge_MiraSubPack": OverlappedLatentMerge,
+    "TiledImageColorCorrection_MiraSubPack": TiledImageColorCorrection,
     "ImageCropTiles_MiraSubPack": ImageCropTiles,
     "ImageCropTilesByPixels_MiraSubPack": ImageCropTilesByPixels,
     "LatentUpscaleAndCropTiles_MiraSubPack": LatentUpscaleAndCropTiles,
@@ -46,6 +47,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ImageTiledKSamplerWithTagger_MiraSubPack": "Tiled Image KSampler with Tagger",
     "OverlappedImageMerge_MiraSubPack": "Overlapped Image Merge",
     "OverlappedLatentMerge_MiraSubPack": "Overlapped Latent Merge",
+    "TiledImageColorCorrection_MiraSubPack": "Tiled Image Color Correction",
     "ImageCropTiles_MiraSubPack": "Image Crop to Tiles",
     "ImageCropTilesByPixels_MiraSubPack": "Image Crop to Tiles by Pixels",
     "LatentUpscaleAndCropTiles_MiraSubPack": "Latent Upscale then Crop to Tiles",

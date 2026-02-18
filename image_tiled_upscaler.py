@@ -426,7 +426,7 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
         # Parse tagger text mapping
         mapping = tagger_text.splitlines()
         tile_latents = None
-        for idx in range(len(batch_latents)):                    
+        for idx in range(len(batch_latents)):
             if tagger_text != "":
                 # Dynamic prompt construction
                 dynamic_prompt = common_positive
@@ -443,8 +443,13 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
                 positive_conditioning = clip.encode_from_tokens_scheduled(positive_tokens)
             
             if ref_latents is not None:
-                all_ref_latent = ref_latents["samples"]                
-                ref_latent = all_ref_latent[idx].unsqueeze(0)                                                
+                all_ref_latent = ref_latents["samples"]
+
+                if len(all_ref_latent) == len(batch_latents):
+                    ref_latent = all_ref_latent[idx].unsqueeze(0)
+                else:
+                    print(f"    >Warning: ref_latents count {len(all_ref_latent)} does not match batch_latents count {len(batch_latents)}. Using the first ref_latent for all tiles.")
+                    ref_latent = all_ref_latent[0].unsqueeze(0)
                 
                 if clip_negative:
                     negative_tokens = clip_negative.tokenize(common_negative)
@@ -726,6 +731,237 @@ class OverlappedImageMerge(io.ComfyNode):
         canvas = canvas / weight_map
         
         return io.NodeOutput(canvas.unsqueeze(0))
+
+# ==========================================
+# Tiled Image Color Correction
+# ==========================================
+class TiledImageColorCorrection(io.ComfyNode):
+    """
+    Color correction for tiled images using reference upscaled image.
+    Corrects color shift in each tile by comparing with the corresponding region in the reference image.
+    Works before merging to ensure precise tile-to-tile color consistency.
+    """    
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="TiledImageColorCorrection_MiraSubPack",
+            display_name="Tiled Image Color Correction",
+            category=CAT,
+            description="Correct color shift in tiled images using reference upscaled image before merging.",
+            inputs=[
+                io.Image.Input("tiled_images", optional=False, tooltip="Sampled tiled images to be corrected."),
+                io.Image.Input("reference_image", optional=False, tooltip="Original upscaled image for color reference."),
+                MiraITUPipeline.Input("mira_itu_pipeline", optional=False, tooltip="Pipeline info with tile dimensions."),
+                io.Combo.Input("correction_method",
+                    default="histogram_match",
+                    options=["histogram_match", "color_transfer", "luminance_only"],
+                    tooltip="Histogram Match: Full distribution matching\nColor Transfer: Mean & Std deviation matching\nLuminance Only: Brightness correction only"),
+                io.Float.Input("correction_strength", default=1, min=0.0, max=1.0, step=0.1,
+                    tooltip="Blend strength: 0=no correction, 1=full correction."),
+                io.Boolean.Input("debug_output", default=False, tooltip="Print detailed correction info."),
+            ],
+            outputs=[
+                io.Image.Output(display_name="corrected_tiles"),
+            ],
+        )
+    
+    @classmethod
+    def execute(cls, tiled_images, reference_image, mira_itu_pipeline, correction_method, correction_strength, debug_output) -> io.NodeOutput:
+        (full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate, pixel_alignment) = mira_itu_pipeline
+        
+        device = tiled_images.device
+        N, _, _, _ = tiled_images.shape
+        
+        # Handle reference image dimensions
+        ref_image = reference_image[0] if reference_image.ndim == 4 else reference_image
+        ref_h, ref_w = ref_image.shape[0], ref_image.shape[1]
+        
+        # Validate reference image matches pipeline dimensions
+        if ref_w != full_width or ref_h != full_height:
+            print(f"[MiraSubPack:TiledImageColorCorrection] ⚠ Warning: Reference image size ({ref_w}x{ref_h}) doesn't match pipeline size ({full_width}x{full_height})")
+            if ref_w > full_width or ref_h > full_height:
+                print("  Cropping reference image to match pipeline size...")
+                ref_image = ref_image[:full_height, :full_width, :]
+            else:
+                print("  Reference image smaller than expected, will handle with cropping/padding per tile")
+        
+        # Recalculate tile positions
+        tiles = TileHelper._calculate_tiles(full_width, full_height, tile_width, tile_height, overlap, pixel_alignment)
+        
+        corrected_tiles = []
+        print(f"[MiraSubPack:TiledImageColorCorrection] Correcting {N} tiles using '{correction_method}' method...")
+        if debug_output:
+            print(f"  Reference image size: {ref_image.shape[1]}x{ref_image.shape[0]}")
+            print(f"  Correction strength: {correction_strength:.2f}")
+            print(f"  Pipeline: {full_width}x{full_height}, Tile: {tile_width}x{tile_height}, Overlap: {overlap}")
+        
+        correction_stats = {
+            "mean_delta": 0.0,
+            "max_delta": 0.0,
+            "skipped": 0,
+        }
+        
+        for idx, (x, y, w, h) in enumerate(tiles):
+            if idx >= N:
+                break
+            
+            tile = tiled_images[idx]  # [H, W, C]
+            
+            # Safely extract reference region
+            ref_x_end = min(x + w, ref_image.shape[1])
+            ref_y_end = min(y + h, ref_image.shape[0])
+            ref_w = ref_x_end - x
+            ref_h = ref_y_end - y
+            
+            if ref_w <= 0 or ref_h <= 0:
+                # Reference region outside bounds, skip correction
+                if debug_output:
+                    print(f"    Tile {idx}: Out of bounds, skipping correction")
+                correction_stats["skipped"] += 1
+                corrected_tiles.append(tile)
+                continue
+            
+            ref_region = ref_image[y:ref_y_end, x:ref_x_end, :]
+            
+            # Resize reference region to match tile size if needed
+            if ref_region.shape[0] != tile.shape[0] or ref_region.shape[1] != tile.shape[1]:
+                ref_region = torch.nn.functional.interpolate(
+                    ref_region.permute(2, 0, 1).unsqueeze(0),
+                    size=(tile.shape[0], tile.shape[1]),
+                    mode='bilinear',
+                    align_corners=False
+                ).squeeze(0).permute(1, 2, 0)
+            
+            # Apply color correction
+            if correction_method == "histogram_match":
+                corrected_tile = cls._histogram_match(tile, ref_region, device)
+            elif correction_method == "color_transfer":
+                corrected_tile = cls._color_transfer(tile, ref_region, device)
+            elif correction_method == "luminance_only":
+                corrected_tile = cls._luminance_correction(tile, ref_region, device)
+            else:
+                corrected_tile = tile
+            
+            # Calculate correction magnitude
+            delta = (corrected_tile - tile).abs().mean().item()
+            correction_stats["mean_delta"] += delta
+            correction_stats["max_delta"] = max(correction_stats["max_delta"], delta)
+            
+            # Blend with original tile
+            corrected_tile = torch.lerp(tile, corrected_tile, correction_strength)
+            corrected_tiles.append(corrected_tile)
+            
+            if debug_output and (idx % max(1, N // 10) == 0 or idx == N - 1):
+                print(f"    Tile {idx+1}/{N}: Corrected (delta={delta:.6f})")
+        
+        # Stack corrected tiles back into batch
+        output = torch.stack(corrected_tiles, dim=0)
+        
+        # Print summary statistics
+        if N > correction_stats["skipped"]:
+            correction_stats["mean_delta"] /= (N - correction_stats["skipped"])
+        if correction_stats["skipped"] > 0:
+            print(f"[MiraSubPack:TiledImageColorCorrection] Correction complete: {correction_stats['skipped']} tiles skipped (out of bounds)")
+        print(f"  Mean color delta: {correction_stats['mean_delta']:.6f}, Max delta: {correction_stats['max_delta']:.6f}")
+        
+        return io.NodeOutput(output)
+    
+    @staticmethod
+    def _histogram_match(tile, reference, device):
+        """
+        Match histogram of tile to reference image.
+        For each color channel, remap the distribution of tile values to match reference distribution.
+        """
+        corrected = tile.clone()
+        C = tile.shape[2]
+        
+        for c in range(C):
+            tile_channel = tile[:, :, c]
+            ref_channel = reference[:, :, c]
+            
+            # Get histogram-based remapping using sorted values
+            tile_flat = tile_channel.flatten()
+            ref_flat = ref_channel.flatten()
+            
+            tile_sorted, tile_indices = torch.sort(tile_flat)
+            ref_sorted, _ = torch.sort(ref_flat)
+            
+            # Create the mapping by resampling reference values
+            # Map tile percentiles to reference percentiles
+            percentile_indices = (torch.arange(len(tile_sorted), device=device, dtype=torch.float32) 
+                                 * (len(ref_sorted) - 1) / (len(tile_sorted) - 1 + 1e-6)).long()
+            percentile_indices = percentile_indices.clamp(0, len(ref_sorted) - 1)
+            
+            mapped_flat = ref_sorted[percentile_indices]
+            
+            # Reconstruct: create inverse mapping
+            remap_flat = torch.zeros_like(tile_flat)
+            remap_flat[tile_indices] = mapped_flat
+            
+            corrected[:, :, c] = remap_flat.reshape(tile_channel.shape)
+        
+        return corrected.clamp(0, 1)
+    
+    @staticmethod
+    def _color_transfer(tile, reference, device):
+        """
+        Transfer color statistics from reference to tile.
+        Matches mean and standard deviation of each channel independently.
+        Preserves relative color differences while shifting to reference color space.
+        """
+        corrected = tile.clone()
+        C = tile.shape[2]
+        
+        for c in range(C):
+            tile_mean = tile[:, :, c].mean()
+            tile_std = tile[:, :, c].std()
+            ref_mean = reference[:, :, c].mean()
+            ref_std = reference[:, :, c].std()
+            
+            # Normalize tile to zero mean and unit variance
+            if tile_std > 1e-6:
+                normalized = (tile[:, :, c] - tile_mean) / (tile_std + 1e-8)
+            else:
+                normalized = tile[:, :, c] - tile_mean
+            
+            # Scale and shift to reference distribution
+            if ref_std > 1e-6:
+                corrected[:, :, c] = normalized * (ref_std + 1e-8) + ref_mean
+            else:
+                corrected[:, :, c] = normalized + ref_mean
+        
+        return corrected.clamp(0, 1)
+    
+    @staticmethod
+    def _luminance_correction(tile, reference, device):
+        """
+        Correct only luminance (brightness) while preserving chrominance (color).
+        Uses simple average of RGB as luminance proxy.
+        Better for preserving local color characteristics while fixing brightness differences.
+        """
+        corrected = tile.clone()
+        
+        if tile.shape[2] >= 3:
+            # Calculate luminance as average of RGB
+            tile_lum = tile[:, :, :3].mean(dim=2, keepdim=True)  # [H, W, 1]
+            ref_lum = reference[:, :, :3].mean(dim=2, keepdim=True)  # [H, W, 1]
+            
+            # Prevent division by zero
+            tile_lum = tile_lum.clamp(min=1e-6)
+            
+            # Calculate luminance ratio
+            lum_ratio = ref_lum / tile_lum  # [H, W, 1]
+            lum_ratio = lum_ratio.clamp(0.5, 2.0)  # Clamp extreme ratios to avoid artifacts
+            
+            # Apply luminance correction to RGB channels
+            for c in range(min(3, tile.shape[2])):
+                corrected[:, :, c] = (tile[:, :, c] * lum_ratio[:, :, 0]).clamp(0, 1)
+            
+            # Keep alpha channel unchanged if present
+            if tile.shape[2] > 3:
+                corrected[:, :, 3:] = tile[:, :, 3:]
+        
+        return corrected
 
 # ==========================================
 # Image Crop Utilities
