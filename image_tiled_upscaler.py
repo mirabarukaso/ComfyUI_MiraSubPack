@@ -626,6 +626,7 @@ class OverlappedLatentMerge(io.ComfyNode):
 class OverlappedImageMerge(io.ComfyNode):
     """
     Merge tiled images with corrected feathering and overlap dominance.
+    Not good for latents due to potential color shifts, but works well for final image merging.
     """
     @classmethod
     def define_schema(cls):
@@ -637,7 +638,7 @@ class OverlappedImageMerge(io.ComfyNode):
             inputs=[
                 io.Image.Input("tiled_images", optional=False, tooltip="Tiled images input."),
                 MiraITUPipeline.Input("mira_itu_pipeline",optional=False, tooltip="Mira Image Tiled Upscale pipeline info from tiling node."),
-                io.Float.Input("feather_rate_override", default=0, min=0, max=4.0, step=0.1, tooltip="Override fathering rate multiplier if value is not 0."),
+                io.Float.Input("feather_rate_override", default=0, min=0, max=4.0, step=0.1, tooltip="Override feathering rate multiplier if value is not 0."),
             ],
             outputs=[
                 io.Image.Output()
