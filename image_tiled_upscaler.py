@@ -776,17 +776,31 @@ class TiledImageColorCorrection(io.ComfyNode):
         ref_image = reference_image[0] if reference_image.ndim == 4 else reference_image
         ref_h, ref_w = ref_image.shape[0], ref_image.shape[1]
         
+        # Early return if no correction needed
+        if correction_strength == 0:
+            print("[MiraSubPack:TiledImageColorCorrection] correction_strength is 0, skipping correction.")
+            return io.NodeOutput(tiled_images)
+        
         # Validate reference image matches pipeline dimensions
         if ref_w != full_width or ref_h != full_height:
             print(f"[MiraSubPack:TiledImageColorCorrection] ⚠ Warning: Reference image size ({ref_w}x{ref_h}) doesn't match pipeline size ({full_width}x{full_height})")
             if ref_w > full_width or ref_h > full_height:
                 print("  Cropping reference image to match pipeline size...")
                 ref_image = ref_image[:full_height, :full_width, :]
-            else:
-                print("  Reference image smaller than expected, will handle with cropping/padding per tile")
+            elif ref_w < full_width or ref_h < full_height:
+                print("  Resizing reference image to match pipeline size...")
+                ref_image = torch.nn.functional.interpolate(
+                    ref_image.permute(2, 0, 1).unsqueeze(0),
+                    size=(full_height, full_width),
+                    mode='bilinear',
+                    align_corners=False
+                ).squeeze(0).permute(1, 2, 0)
         
         # Recalculate tile positions
         tiles = TileHelper._calculate_tiles(full_width, full_height, tile_width, tile_height, overlap, pixel_alignment)
+        
+        if len(tiles) != N:
+            print(f"[MiraSubPack:TiledImageColorCorrection] ⚠ Warning: Calculated {len(tiles)} tile positions but received {N} tile images. Will process min({len(tiles)}, {N}) tiles.")
         
         corrected_tiles = []
         print(f"[MiraSubPack:TiledImageColorCorrection] Correcting {N} tiles using '{correction_method}' method...")
@@ -810,10 +824,10 @@ class TiledImageColorCorrection(io.ComfyNode):
             # Safely extract reference region
             ref_x_end = min(x + w, ref_image.shape[1])
             ref_y_end = min(y + h, ref_image.shape[0])
-            ref_w = ref_x_end - x
-            ref_h = ref_y_end - y
+            tile_ref_w = ref_x_end - x
+            tile_ref_h = ref_y_end - y
             
-            if ref_w <= 0 or ref_h <= 0:
+            if tile_ref_w <= 0 or tile_ref_h <= 0:
                 # Reference region outside bounds, skip correction
                 if debug_output:
                     print(f"    Tile {idx}: Out of bounds, skipping correction")
@@ -889,8 +903,8 @@ class TiledImageColorCorrection(io.ComfyNode):
             # Create the mapping by resampling reference values
             # Map tile percentiles to reference percentiles
             percentile_indices = (torch.arange(len(tile_sorted), device=device, dtype=torch.float32) 
-                                 * (len(ref_sorted) - 1) / (len(tile_sorted) - 1 + 1e-6)).long()
-            percentile_indices = percentile_indices.clamp(0, len(ref_sorted) - 1)
+                                 * (len(ref_sorted) - 1) / (len(tile_sorted) - 1 + 1e-6))
+            percentile_indices = percentile_indices.clamp(0, len(ref_sorted) - 1).long()
             
             mapped_flat = ref_sorted[percentile_indices]
             
@@ -936,26 +950,24 @@ class TiledImageColorCorrection(io.ComfyNode):
     def _luminance_correction(tile, reference, device):
         """
         Correct only luminance (brightness) while preserving chrominance (color).
-        Uses simple average of RGB as luminance proxy.
+        Uses region-level average luminance ratio to avoid per-pixel noise amplification.
         Better for preserving local color characteristics while fixing brightness differences.
         """
         corrected = tile.clone()
         
         if tile.shape[2] >= 3:
-            # Calculate luminance as average of RGB
-            tile_lum = tile[:, :, :3].mean(dim=2, keepdim=True)  # [H, W, 1]
-            ref_lum = reference[:, :, :3].mean(dim=2, keepdim=True)  # [H, W, 1]
+            # Calculate region-level average luminance (more stable than per-pixel)
+            tile_lum_mean = tile[:, :, :3].mean()  # scalar
+            ref_lum_mean = reference[:, :, :3].mean()  # scalar
             
             # Prevent division by zero
-            tile_lum = tile_lum.clamp(min=1e-6)
+            tile_lum_mean = tile_lum_mean.clamp(min=1e-6)
             
-            # Calculate luminance ratio
-            lum_ratio = ref_lum / tile_lum  # [H, W, 1]
-            lum_ratio = lum_ratio.clamp(0.5, 2.0)  # Clamp extreme ratios to avoid artifacts
+            # Calculate global luminance ratio
+            lum_ratio = (ref_lum_mean / tile_lum_mean).clamp(0.5, 2.0)  # scalar
             
             # Apply luminance correction to RGB channels
-            for c in range(min(3, tile.shape[2])):
-                corrected[:, :, c] = (tile[:, :, c] * lum_ratio[:, :, 0]).clamp(0, 1)
+            corrected[:, :, :3] = (tile[:, :, :3] * lum_ratio).clamp(0, 1)
             
             # Keep alpha channel unchanged if present
             if tile.shape[2] > 3:
