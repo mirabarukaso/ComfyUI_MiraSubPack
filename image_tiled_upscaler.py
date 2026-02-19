@@ -8,6 +8,8 @@ import node_helpers
 
 CAT = "Mira/SubPack/Image Tiled Upscaler"
 
+TILE_ALIGMENT_TIP = "Align tile dimensions to multiples of this value (e.g., 8 SDXL, 16 FLUX.2, 32 Qwen Image)."
+
 # ==========================================
 # Custom Node Type Definition
 # ==========================================
@@ -66,13 +68,13 @@ class MiraITUPipelineCombine(io.ComfyNode):
             category=CAT,
             description="Combine upscaled pipeline info.",
             inputs=[
-                io.Int.Input("full_width", optional=False, tooltip="Full image width."),
-                io.Int.Input("full_height", optional=False, tooltip="Full image height."),
-                io.Int.Input("tile_width", optional=False, tooltip="Tile width."),
-                io.Int.Input("tile_height", optional=False, tooltip="Tile height."),
-                io.Int.Input("overlap", optional=False, tooltip="Overlap pixels."),
-                io.Float.Input("overlap_feather_rate", optional=False, tooltip="Overlap feather rate."),
-                io.Int.Input("pixel_alignment", optional=False, tooltip="Pixel alignment for tile calculations."),
+                io.Int.Input("full_width", max=65536, tooltip="Full image width."),
+                io.Int.Input("full_height", max=65536, tooltip="Full image height."),
+                io.Int.Input("tile_width", max=8192, tooltip="Tile width."),
+                io.Int.Input("tile_height", max=8192, tooltip="Tile height."),
+                io.Int.Input("overlap", max=2048, tooltip="Overlap pixels."),
+                io.Float.Input("overlap_feather_rate", max=8.0, tooltip="Overlap feather rate."),
+                io.Int.Input("pixel_alignment", max=256, tooltip="Pixel alignment for tile calculations."),
             ],
             outputs=[
                 MiraITUPipeline.Output(display_name="mira_itu_pipeline"),
@@ -114,8 +116,10 @@ class FeatherBlendHelper:
                 return mask[..., None].expand(-1, -1, channels)
             return mask
 
-        # Create ramp gradients
-        ramp = torch.linspace(0, 1, feather, device=device, dtype=torch.float32)
+        # Create cosine ramp gradients (smoother than linear, eliminates derivative
+        # discontinuities at tile boundaries that cause visible seams)
+        t = torch.linspace(0.0, 1.0, feather, device=device, dtype=torch.float32)
+        ramp = 0.5 - 0.5 * torch.cos(t * math.pi)
         
         # Feather Top (If not at the very top of the image)
         if tile_y > 0:
@@ -394,6 +398,9 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
                 io.Combo.Input("sampler_name", default="euler_ancestral", options=comfy.samplers.KSampler.SAMPLERS),
                 io.Combo.Input("scheduler", default="beta", options=comfy.samplers.KSampler.SCHEDULERS),
                 io.Float.Input("denoise", default=0.35, min=0.0, max=1.0, step=0.01),
+                io.Combo.Input("mode", default="Normal", options=["Normal", "Reference"],
+                    tooltip="Normal: ignore ref_latents and noise boost. (SDXL/Z Image)\n"
+                            "Reference: use ref_latents with optional noise boost. (Flux.2)"),
                 io.Float.Input("noise_boost", default=0.0, min=0.0, max=1.0, step=0.05,
                     tooltip="Extra noise injected into ref_latents before conditioning to encourage detail generation.\n"
                             "Perturbs the reference that guides generation, effective even at denoise=1.0.\n"
@@ -406,7 +413,7 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
                     tooltip="Noise injection method:\n"
                             "uniform: Standard Gaussian noise, uniform across all regions.\n"
                             "high_frequency: Emphasizes high-frequency detail noise, better for textures.\n"
-                            "adaptive: Adds more noise to flat/blurry regions, less to detailed areas (recommended)."),
+                            "adaptive: Adds more noise to flat/blurry regions, less to detailed areas."),
                 io.Clip.Input("clip_negative", optional=True),
                 io.Latent.Input("ref_latents", optional=True),
             ],
@@ -417,7 +424,7 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
     
     @classmethod
     def execute(cls, model, clip, tiled_samples, common_positive, common_negative, tagger_text,
-               seed, steps, cfg, sampler_name, scheduler, denoise, noise_boost=0.0, noise_injection_method="adaptive",
+             seed, steps, cfg, sampler_name, scheduler, denoise, mode="Reference", noise_boost=0.0, noise_injection_method="adaptive",
                clip_negative = None, ref_latents = None
                ) -> io.NodeOutput:
         negative_conditioning = None
@@ -434,32 +441,36 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
         print(f"[MiraSubPack:AutoTiledTagger] Using {len(batch_latents)} tiles.")
         print(f"[MiraSubPack:AutoTiledTagger] tagger_text (for copy to SAA)\n{tagger_text}")
         
-        if ref_latents is not None:
+        if mode == "Normal" and ref_latents is not None:
+            print("    >Mode=Normal: ref_latents will be ignored.")
+        elif ref_latents is not None:
             print("    >Using provided reference latents for this tile.")
-        
-        if noise_boost > 0:
+
+        if mode == "Normal" and noise_boost > 0:
+            print(f"[MiraSubPack:AutoTiledTagger] Mode={mode}: noise_boost is ignored.")
+        elif noise_boost > 0:
             print(f"[MiraSubPack:AutoTiledTagger] Noise boost: {noise_boost:.2f}, method: {noise_injection_method}")
                             
         # Parse tagger text mapping
         mapping = tagger_text.splitlines()
         tile_latents = None
         for idx in range(len(batch_latents)):
+            # Build dynamic prompt
             if tagger_text != "":
-                # Dynamic prompt construction
                 dynamic_prompt = common_positive
                 tags_str = ""
                 if idx < len(mapping):
                     tags_str = mapping[idx].replace('(', r'\(').replace(')', r'\)')
                     dynamic_prompt = f"{common_positive}, {tags_str}" if common_positive else tags_str
-                                
                 print(f"    Tags: {tags_str}")
-                positive_tokens = clip.tokenize(dynamic_prompt)
-                positive_conditioning = clip.encode_from_tokens_scheduled(positive_tokens)
             else:
-                positive_tokens = clip.tokenize(common_positive)
-                positive_conditioning = clip.encode_from_tokens_scheduled(positive_tokens)
+                dynamic_prompt = common_positive
+
+            # Tokenize
+            positive_tokens = clip.tokenize(dynamic_prompt)
+            positive_conditioning = clip.encode_from_tokens_scheduled(positive_tokens)
             
-            if ref_latents is not None:
+            if ref_latents is not None and mode != "Normal":
                 all_ref_latent = ref_latents["samples"]
 
                 if len(all_ref_latent) == len(batch_latents):
@@ -468,30 +479,30 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
                     print(f"    >Warning: ref_latents count {len(all_ref_latent)} does not match batch_latents count {len(batch_latents)}. Using the first ref_latent for all tiles.")
                     ref_latent = all_ref_latent[0].unsqueeze(0)
                 
-                # Inject noise into ref_latent (not single_latent) to perturb the reference
-                # that guides generation. At high denoise (e.g. 1.0), single_latent is replaced
-                # by pure noise, so injecting there is meaningless. The ref_latent is what
-                # actually anchors the output via conditioning - perturbing it gives the model
-                # freedom to generate new details instead of faithfully reproducing the blurry original.
-                if noise_boost > 0:
-                    ref_latent = cls._inject_noise(
-                        ref_latent, noise_boost, noise_injection_method, seed + idx
-                    )
-                    print(f"    Noise boost applied to ref_latent (boost={noise_boost:.2f}, method={noise_injection_method})")
-                
-                if clip_negative:
-                    negative_tokens = clip_negative.tokenize(common_negative)
-                    negative_conditioning = clip_negative.encode_from_tokens_scheduled(negative_tokens)    
-                else:
-                    negative_tokens = clip.tokenize(common_negative)
-                    negative_conditioning = clip.encode_from_tokens_scheduled(negative_tokens)
-                                    
-                positive_conditioning = node_helpers.conditioning_set_values(positive_conditioning, {"reference_latents": [ref_latent]}, append=True)
-                negative_conditioning = node_helpers.conditioning_set_values(negative_conditioning, {"reference_latents": [ref_latent]}, append=True)
-                                
-                del positive_tokens
-                del negative_tokens
-                torch.cuda.empty_cache()                        
+                if mode == "Reference":
+                    # Inject noise into ref_latent (not single_latent) to perturb the reference
+                    # that guides generation. At high denoise (e.g. 1.0), single_latent is replaced
+                    # by pure noise, so injecting there is meaningless. The ref_latent is what
+                    # actually anchors the output via conditioning - perturbing it gives the model
+                    # freedom to generate new details instead of faithfully reproducing the blurry original.
+                    if noise_boost > 0:
+                        ref_latent = cls._inject_noise(
+                            ref_latent, noise_boost, noise_injection_method, seed + idx
+                        )
+                        print(f"    Noise boost applied to ref_latent (boost={noise_boost:.2f}, method={noise_injection_method})")
+
+                    if clip_negative:
+                        negative_tokens = clip_negative.tokenize(common_negative)
+                        negative_conditioning = clip_negative.encode_from_tokens_scheduled(negative_tokens)
+                    else:
+                        negative_tokens = clip.tokenize(common_negative)
+                        negative_conditioning = clip.encode_from_tokens_scheduled(negative_tokens)
+
+                    positive_conditioning = node_helpers.conditioning_set_values(positive_conditioning, {"reference_latents": [ref_latent]}, append=True)
+                    negative_conditioning = node_helpers.conditioning_set_values(negative_conditioning, {"reference_latents": [ref_latent]}, append=True)
+
+                    del positive_tokens
+                    del negative_tokens                    
             
             single_latent = batch_latents[idx].unsqueeze(0)  # [C, H, W] -> [1, C, H, W]
                 
@@ -503,9 +514,10 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
             )            
             tile_latents = torch.cat([tile_latents, sampled_tile["samples"]], dim=0) if tile_latents is not None else sampled_tile["samples"]
             
-            if ref_latents is not None:
+            if ref_latents is not None and mode == "Reference":
                 del positive_conditioning
                 del negative_conditioning
+                torch.cuda.empty_cache()
                 
         return io.NodeOutput({"samples": tile_latents})
     
@@ -657,8 +669,12 @@ class OverlappedLatentMerge(io.ComfyNode):
         weight_map = torch.zeros((1, 1, lh, lw), device=device, dtype=torch.float32)
         
         # 3. Feathering params
-        feather_px = max(overlap * 4, int(overlap * overlap_feather_rate))
-        feather_px = min(max(tile_width, tile_height) * 0.25, feather_px)
+        # Use overlap_feather_rate directly (feather = overlap × rate).
+        # rate=2.0 (default) → feather=128px for overlap=64, extending 64px
+        # beyond the overlap zone on each side for smooth blending.
+        feather_px = int(overlap * overlap_feather_rate)
+        feather_px = int(min(max(tile_width, tile_height) * 0.25, feather_px))
+        feather_px = max(feather_px, 1)
         l_feather = int(feather_px // pixel_alignment)
         
         # Track previous tile end positions to detect overlap ratio
@@ -748,7 +764,7 @@ class OverlappedImageMerge(io.ComfyNode):
             inputs=[
                 io.Image.Input("tiled_images", optional=False, tooltip="Tiled images input."),
                 MiraITUPipeline.Input("mira_itu_pipeline",optional=False, tooltip="Mira Image Tiled Upscale pipeline info from tiling node."),
-                io.Float.Input("feather_rate_override", default=0, min=0, max=4.0, step=0.1, tooltip="Override feathering rate multiplier if value is not 0."),
+                io.Float.Input("feather_rate_override", default=0, min=-0.1, max=4.0, step=0.1, tooltip="Override feathering rate multiplier if value is not 0. Use -0.1 to disable feathering and directly overwrite tiles."),
             ],
             outputs=[
                 io.Image.Output()
@@ -758,7 +774,10 @@ class OverlappedImageMerge(io.ComfyNode):
     @classmethod
     def execute(cls, tiled_images, mira_itu_pipeline, feather_rate_override) -> io.NodeOutput:
         (full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate, pixel_alignment) = mira_itu_pipeline
-        if round(feather_rate_override,2) != 0:
+        direct_overwrite = round(feather_rate_override, 2) == -0.1
+        if direct_overwrite:
+            print("[MiraSubPack:OverlappedImageMerge] Feathering disabled (-0.1), using direct overwrite.")
+        elif round(feather_rate_override,2) != 0:
             print(f"[MiraSubPack:OverlappedImageMerge] Override feather_rate to {feather_rate_override} ")
             overlap_feather_rate = feather_rate_override
         
@@ -773,9 +792,10 @@ class OverlappedImageMerge(io.ComfyNode):
         canvas = torch.zeros((full_height, full_width, C), device=device, dtype=torch.float32)
         # weight_map only needs to track accumulated weight, so it uses 1 channel
         weight_map = torch.zeros((full_height, full_width, 1), device=device, dtype=torch.float32)
-        
-        feather = max(overlap * 4, int(overlap * overlap_feather_rate))
-        feather = int(min(max(tile_width, tile_height) * 0.25, feather))
+
+        if not direct_overwrite:
+            feather = max(overlap * 4, int(overlap * overlap_feather_rate))
+            feather = int(min(max(tile_width, tile_height) * 0.25, feather))
         
         row_last_x_end = {}
         col_last_y_end = {}
@@ -790,61 +810,68 @@ class OverlappedImageMerge(io.ComfyNode):
             # Crop tile to expected size (safety check)
             tile = tile[:h, :w, :]
             
-            # Get Geometric Mask (Single Channel [H, W])
-            # We use channels=None to get a 2D mask [h, w] first
-            mask_2d = FeatherBlendHelper.get_geometric_mask(
-                x, y, w, h, full_width, full_height, feather, device, channels=None
-            )
-            
-            # --- Overlap Dominance Logic ---
-            boost_weight = 1.0
-            
-            # Horizontal Check
-            if y in row_last_x_end:
-                prev_end = row_last_x_end[y]
-                overlap_amt = prev_end - x
-                if overlap_amt > (w * 0.5):
-                    boost_weight = 10.0
-            
-            # Vertical Check
-            if x in col_last_y_end:
-                prev_end = col_last_y_end[x]
-                overlap_amt = prev_end - y
-                if overlap_amt > (h * 0.5):
-                    boost_weight = max(boost_weight, 10.0)
-            
-            if boost_weight > 1.0:
-                mask_2d = mask_2d * boost_weight
-
-            # Prepare masks for broadcasting
-            # mask_3ch for Image: [H, W, 1] -> broadcasts to [H, W, 3] during multiplication
-            mask_expanded = mask_2d[:, :, None] 
+            if direct_overwrite:
+                canvas[y:y+h, x:x+w, :] = tile
+            else:
+                # Get Geometric Mask (Single Channel [H, W])
+                # We use channels=None to get a 2D mask [h, w] first
+                mask_2d = FeatherBlendHelper.get_geometric_mask(
+                    x, y, w, h, full_width, full_height, feather, device, channels=None
+                )
                 
-            # Accumulate
-            # canvas (3ch) += tile (3ch) * mask (1ch, broadcasts to 3ch) -> Works
-            canvas[y:y+h, x:x+w, :] += tile * mask_expanded
-            
-            # weight_map (1ch) += mask (1ch) -> Works (Fixes the RuntimeError)
-            weight_map[y:y+h, x:x+w, :] += mask_expanded
+                # --- Overlap Dominance Logic ---
+                boost_weight = 1.0
+                
+                # Horizontal Check
+                if y in row_last_x_end:
+                    prev_end = row_last_x_end[y]
+                    overlap_amt = prev_end - x
+                    if overlap_amt > (w * 0.5):
+                        boost_weight = 10.0
+                
+                # Vertical Check
+                if x in col_last_y_end:
+                    prev_end = col_last_y_end[x]
+                    overlap_amt = prev_end - y
+                    if overlap_amt > (h * 0.5):
+                        boost_weight = max(boost_weight, 10.0)
+                
+                if boost_weight > 1.0:
+                    mask_2d = mask_2d * boost_weight
+
+                # Prepare masks for broadcasting
+                # mask_3ch for Image: [H, W, 1] -> broadcasts to [H, W, 3] during multiplication
+                mask_expanded = mask_2d[:, :, None] 
+                    
+                # Accumulate
+                # canvas (3ch) += tile (3ch) * mask (1ch, broadcasts to 3ch) -> Works
+                canvas[y:y+h, x:x+w, :] += tile * mask_expanded
+                
+                # weight_map (1ch) += mask (1ch) -> Works (Fixes the RuntimeError)
+                weight_map[y:y+h, x:x+w, :] += mask_expanded
             
             # Update trackers
             row_last_x_end[y] = x + w
             col_last_y_end[x] = y + h
 
         # 3. Normalize
+        if direct_overwrite:
+            return io.NodeOutput(canvas.unsqueeze(0))
+
         weight_map = weight_map.clamp(min=1e-5)
         canvas = canvas / weight_map
         
         return io.NodeOutput(canvas.unsqueeze(0))
-
+    
 # ==========================================
 # Tiled Image Color Correction
 # ==========================================
 class TiledImageColorCorrection(io.ComfyNode):
     """
-    Color correction for tiled images using reference upscaled image.
-    Corrects color shift in each tile by comparing with the corresponding region in the reference image.
-    Works before merging to ensure precise tile-to-tile color consistency.
+    Color correction for tiled images using pre-ksampler reference tiles.
+    Corrects color/luminance shift in each tile by directly comparing with the
+    corresponding reference tile (same index), so no pipeline recalculation is needed.
+    Supports applying color correction and luminance correction independently or together.
     """    
     @classmethod
     def define_schema(cls):
@@ -852,18 +879,27 @@ class TiledImageColorCorrection(io.ComfyNode):
             node_id="TiledImageColorCorrection_MiraSubPack",
             display_name="Tiled Image Color Correction",
             category=CAT,
-            description="Correct color shift in tiled images using reference upscaled image before merging.",
+            description="Correct color/luminance shift in tiled images using pre-ksampler reference tiles. Supports combining color and luminance corrections.",
             inputs=[
-                io.Image.Input("tiled_images", optional=False, tooltip="Sampled tiled images to be corrected."),
-                io.Image.Input("reference_image", optional=False, tooltip="Original upscaled image for color reference."),
-                MiraITUPipeline.Input("mira_itu_pipeline", optional=False, tooltip="Pipeline info with tile dimensions."),
-                io.Combo.Input("correction_method",
+                io.Image.Input("tiled_images", optional=False, tooltip="Sampled tiled images to be corrected (post-ksampler)."),
+                io.Image.Input("reference_tiles", optional=False, tooltip="Original tiles before ksampler (e.g. tiled_images output from ImageCropTiles). Must have the same tile count as tiled_images."),
+                io.Combo.Input("color_correction_method",
                     default="histogram_match",
-                    options=["histogram_match", "color_transfer", "luminance_only"],
-                    tooltip="Histogram Match: Full distribution matching\nColor Transfer: Mean & Std deviation matching\nLuminance Only: Brightness correction only"),
-                io.Float.Input("correction_strength", default=1, min=0.0, max=3.0, step=0.1,
-                    tooltip="Blend strength: 0=no correction, 1=full correction, >1=over-correction (extrapolation)."),
-                io.Boolean.Input("debug_output", default=False, tooltip="Print detailed correction info."),
+                    options=["none", "histogram_match", "color_transfer"],
+                    tooltip="Color correction method applied to each tile:\n"
+                            "none: Skip color correction.\n"
+                            "Histogram Match: Full per-channel distribution matching.\n"
+                            "Color Transfer: Mean & std matching in CIE LAB space (Reinhard 2001)."),
+                io.Float.Input("color_correction_strength", default=1.0, min=0.0, max=1.0, step=0.05,
+                    tooltip="Blend strength for color correction: 0=no correction, 1=full correction."),
+                io.Float.Input("luminance_correction_strength", default=0.0, min=0.0, max=1.0, step=0.05,
+                    tooltip="Blend strength for luminance (brightness+contrast) correction applied AFTER color correction.\n"
+                            "0=skip, 1=full luminance match.\n"
+                            "Can be combined with any color_correction_method."),
+                io.Float.Input("edge_preserving_smooth", default=0.0, min=0.0, max=1.0, step=0.1,
+                    tooltip="Optional edge-preserving smoothing to reduce color artifacts/stains.\n"
+                            "0=no smoothing, 0.3-0.5=recommended for artifact reduction, 1.0=maximum smoothing.\n"
+                            "Applied as final post-processing step."),
             ],
             outputs=[
                 io.Image.Output(display_name="corrected_tiles"),
@@ -871,214 +907,433 @@ class TiledImageColorCorrection(io.ComfyNode):
         )
     
     @classmethod
-    def execute(cls, tiled_images, reference_image, mira_itu_pipeline, correction_method, correction_strength, debug_output) -> io.NodeOutput:
-        (full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate, pixel_alignment) = mira_itu_pipeline
-        
+    def execute(cls, tiled_images, reference_tiles, color_correction_method, color_correction_strength, luminance_correction_strength, edge_preserving_smooth) -> io.NodeOutput:
         device = tiled_images.device
-        N, _, _, _ = tiled_images.shape
-        
-        # Handle reference image dimensions
-        ref_image = reference_image[0] if reference_image.ndim == 4 else reference_image
-        ref_h, ref_w = ref_image.shape[0], ref_image.shape[1]
-        
+        N = tiled_images.shape[0]
+        N_ref = reference_tiles.shape[0]
+
         # Early return if no correction needed
-        if correction_strength == 0:
-            print("[MiraSubPack:TiledImageColorCorrection] correction_strength is 0, skipping correction.")
+        if color_correction_strength == 0 and luminance_correction_strength == 0:
+            print("[MiraSubPack:TiledImageColorCorrection] All correction strengths are 0, skipping.")
             return io.NodeOutput(tiled_images)
-        
-        # Validate reference image matches pipeline dimensions
-        if ref_w != full_width or ref_h != full_height:
-            print(f"[MiraSubPack:TiledImageColorCorrection] ⚠ Warning: Reference image size ({ref_w}x{ref_h}) doesn't match pipeline size ({full_width}x{full_height})")
-            if ref_w > full_width or ref_h > full_height:
-                print("  Cropping reference image to match pipeline size...")
-                ref_image = ref_image[:full_height, :full_width, :]
-            elif ref_w < full_width or ref_h < full_height:
-                print("  Resizing reference image to match pipeline size...")
-                ref_image = torch.nn.functional.interpolate(
-                    ref_image.permute(2, 0, 1).unsqueeze(0),
-                    size=(full_height, full_width),
-                    mode='bilinear',
-                    align_corners=False
-                ).squeeze(0).permute(1, 2, 0)
-        
-        # Recalculate tile positions
-        tiles = TileHelper._calculate_tiles(full_width, full_height, tile_width, tile_height, overlap, pixel_alignment)
-        
-        if len(tiles) != N:
-            print(f"[MiraSubPack:TiledImageColorCorrection] ⚠ Warning: Calculated {len(tiles)} tile positions but received {N} tile images. Will process min({len(tiles)}, {N}) tiles.")
-        
-        corrected_tiles = []
-        print(f"[MiraSubPack:TiledImageColorCorrection] Correcting {N} tiles using '{correction_method}' method...")
-        if debug_output:
-            print(f"  Reference image size: {ref_image.shape[1]}x{ref_image.shape[0]}")
-            print(f"  Correction strength: {correction_strength:.2f}")
-            print(f"  Pipeline: {full_width}x{full_height}, Tile: {tile_width}x{tile_height}, Overlap: {overlap}")
-        
+
+        if N_ref != N:
+            print(f"[MiraSubPack:TiledImageColorCorrection] ⚠ Warning: reference_tiles count ({N_ref}) != tiled_images count ({N}). Will process min({N_ref}, {N}) tiles.")
+
+        active_methods = []
+        if color_correction_method != "none" and color_correction_strength > 0:
+            active_methods.append(f"{color_correction_method}(s={color_correction_strength:.2f})")
+        if luminance_correction_strength > 0:
+            active_methods.append(f"luminance(s={luminance_correction_strength:.2f})")
+        method_str = " + ".join(active_methods) if active_methods else "none"
+        print(f"[MiraSubPack:TiledImageColorCorrection] Correcting {N} tiles | method: {method_str}")
+
         correction_stats = {
             "mean_delta": 0.0,
             "max_delta": 0.0,
-            "skipped": 0,
         }
-        
-        for idx, (x, y, w, h) in enumerate(tiles):
-            if idx >= N:
-                break
-            
+
+        corrected_tiles = []
+        process_count = min(N, N_ref)
+
+        for idx in range(N):
             tile = tiled_images[idx]  # [H, W, C]
-            
-            # Safely extract reference region
-            ref_x_end = min(x + w, ref_image.shape[1])
-            ref_y_end = min(y + h, ref_image.shape[0])
-            tile_ref_w = ref_x_end - x
-            tile_ref_h = ref_y_end - y
-            
-            if tile_ref_w <= 0 or tile_ref_h <= 0:
-                # Reference region outside bounds, skip correction
-                if debug_output:
-                    print(f"    Tile {idx}: Out of bounds, skipping correction")
-                correction_stats["skipped"] += 1
+
+            if idx >= process_count:
+                # No reference available for this tile, pass through
                 corrected_tiles.append(tile)
                 continue
-            
-            ref_region = ref_image[y:ref_y_end, x:ref_x_end, :]
-            
-            # Resize reference region to match tile size if needed
-            if ref_region.shape[0] != tile.shape[0] or ref_region.shape[1] != tile.shape[1]:
-                ref_region = torch.nn.functional.interpolate(
-                    ref_region.permute(2, 0, 1).unsqueeze(0),
+
+            ref_tile = reference_tiles[idx]  # [H, W, C]
+
+            # Resize reference tile to match sampled tile size if needed
+            # (e.g. when upscaling was involved between crop and decode)
+            if ref_tile.shape[0] != tile.shape[0] or ref_tile.shape[1] != tile.shape[1]:
+                ref_tile = torch.nn.functional.interpolate(
+                    ref_tile.permute(2, 0, 1).unsqueeze(0),
                     size=(tile.shape[0], tile.shape[1]),
                     mode='bilinear',
                     align_corners=False
                 ).squeeze(0).permute(1, 2, 0)
-            
-            # Apply color correction
-            if correction_method == "histogram_match":
-                corrected_tile = cls._histogram_match(tile, ref_region, device)
-            elif correction_method == "color_transfer":
-                corrected_tile = cls._color_transfer(tile, ref_region, device)
-            elif correction_method == "luminance_only":
-                corrected_tile = cls._luminance_correction(tile, ref_region, device)
-            else:
-                corrected_tile = tile
-            
-            # Calculate correction magnitude
+
+            corrected_tile = tile
+
+            # --- Step 1: Color correction ---
+            if color_correction_method != "none" and color_correction_strength > 0:
+                if color_correction_method == "histogram_match":
+                    color_corrected = cls._histogram_match(tile, ref_tile, device)
+                elif color_correction_method == "color_transfer":
+                    color_corrected = cls._color_transfer(tile, ref_tile, device)
+                else:
+                    color_corrected = tile
+                corrected_tile = torch.lerp(tile, color_corrected, color_correction_strength)
+
+            # --- Step 2: Luminance correction (on top of step 1 result) ---
+            if luminance_correction_strength > 0:
+                lum_corrected = cls._luminance_correction(corrected_tile, ref_tile, device)
+                corrected_tile = torch.lerp(corrected_tile, lum_corrected, luminance_correction_strength)
+
+            # --- Step 3: Optional edge-preserving smoothing to reduce artifacts ---
+            if edge_preserving_smooth > 0:
+                smoothed = cls._edge_preserving_smooth(corrected_tile, edge_preserving_smooth, device)
+                corrected_tile = smoothed
+
+            corrected_tile = corrected_tile.clamp(0, 1)
+
+            # Track correction magnitude relative to original tile
             delta = (corrected_tile - tile).abs().mean().item()
             correction_stats["mean_delta"] += delta
             correction_stats["max_delta"] = max(correction_stats["max_delta"], delta)
-            
-            # Blend with original tile (values > 1.0 extrapolate for stronger correction)
-            corrected_tile = torch.lerp(tile, corrected_tile, correction_strength).clamp(0, 1)
+
             corrected_tiles.append(corrected_tile)
-            
-            if debug_output and (idx % max(1, N // 10) == 0 or idx == N - 1):
-                print(f"    Tile {idx+1}/{N}: Corrected (delta={delta:.6f})")
-        
+
         # Stack corrected tiles back into batch
         output = torch.stack(corrected_tiles, dim=0)
-        
+
         # Print summary statistics
-        if N > correction_stats["skipped"]:
-            correction_stats["mean_delta"] /= (N - correction_stats["skipped"])
-        if correction_stats["skipped"] > 0:
-            print(f"[MiraSubPack:TiledImageColorCorrection] Correction complete: {correction_stats['skipped']} tiles skipped (out of bounds)")
-        print(f"  Mean color delta: {correction_stats['mean_delta']:.6f}, Max delta: {correction_stats['max_delta']:.6f}")
-        
+        if process_count > 0:
+            correction_stats["mean_delta"] /= process_count
+        print(f"  Mean delta: {correction_stats['mean_delta']:.6f}, Max delta: {correction_stats['max_delta']:.6f}")
+
         return io.NodeOutput(output)
     
     @staticmethod
+    def _match_channel_histogram(src_flat: torch.Tensor, ref_flat: torch.Tensor, device) -> torch.Tensor:
+        """
+        Improved histogram matching using exact sort-matching (Quantile Matching).
+        
+        This avoids the "foggy/blocky" artifacts caused by binning (discretization) 
+        in traditional CDF matching. It matches the statistical distribution 
+        while preserving the local gradients of the source.
+        """
+        src_flat = src_flat.view(-1)
+        ref_flat = ref_flat.view(-1)
+        
+        n_src = src_flat.numel()
+        n_ref = ref_flat.numel()
+        
+        if n_src == 0 or n_ref == 0:
+            return src_flat
+
+        # 1. Get Source Indices (argsort)
+        # We need to preserve the relative ordering (rank) of the source pixels.
+        # This tells us: "Pixel i was the k-th smallest value in the source image"
+        src_indices = torch.argsort(src_flat)
+        
+        # 2. Sort Reference to get the Target Quantile Function
+        # We want the reference values sorted min to max
+        ref_sorted, _ = torch.sort(ref_flat)
+
+        # 3. Interpolate Reference values to match Source count
+        # We map the k-th rank of Source to the k-th rank of Reference.
+        if n_src == n_ref:
+            mapped_sorted = ref_sorted
+        else:
+            # We need to sample the reference distribution at n_src points
+            # Treat ref_sorted as signal y, defined on x = [0, 1]
+            # We want values at linspace(0, 1, n_src)
+            try:
+                # Optimized 1D interpolation
+                # Input: [Batch, Channel, Length] -> [1, 1, n_ref]
+                input_tensor = ref_sorted.view(1, 1, -1)
+                # Output size: n_src
+                mapped_sorted = torch.nn.functional.interpolate(
+                    input_tensor, size=n_src, mode='linear', align_corners=True
+                ).view(-1)
+            except Exception:
+                # Fallback for very weird shapes or errors
+                mapped_sorted = ref_sorted
+
+        # 4. Map back to original positions
+        # The pixel that was k-th smallest in Source (src_indices[k]) 
+        # gets the value mapped_sorted[k]
+        
+        # Create an empty tensor to scatter values back
+        matched = torch.zeros_like(src_flat)
+        matched.scatter_(0, src_indices, mapped_sorted)
+        
+        return matched
+
+    @staticmethod
     def _histogram_match(tile, reference, device):
         """
-        Match histogram of tile to reference image.
-        For each color channel, remap the distribution of tile values to match reference distribution.
+        Match histogram of tile to reference image in CIE LAB space.
+
+        Performing histogram matching per-channel in RGB destroys the inter-channel
+        correlation (the R, G, B values of each pixel are correlated; remapping them
+        independently with different rank orderings dismantles valid colour combinations),
+        which produces the characteristic foggy colour blotches.
+
+        LAB is perceptually decorrelated: L = luminance, a/b = chrominance axes.
+        Matching each axis independently in LAB is safe and avoids hue artefacts.
         """
-        corrected = tile.clone()
-        C = tile.shape[2]
-        
-        for c in range(C):
-            tile_channel = tile[:, :, c]
-            ref_channel = reference[:, :, c]
-            
-            # Get histogram-based remapping using sorted values
-            tile_flat = tile_channel.flatten()
-            ref_flat = ref_channel.flatten()
-            
-            tile_sorted, tile_indices = torch.sort(tile_flat)
-            ref_sorted, _ = torch.sort(ref_flat)
-            
-            # Create the mapping by resampling reference values
-            # Map tile percentiles to reference percentiles
-            percentile_indices = (torch.arange(len(tile_sorted), device=device, dtype=torch.float32) 
-                                 * (len(ref_sorted) - 1) / (len(tile_sorted) - 1 + 1e-6))
-            percentile_indices = percentile_indices.clamp(0, len(ref_sorted) - 1).long()
-            
-            mapped_flat = ref_sorted[percentile_indices]
-            
-            # Reconstruct: create inverse mapping
-            remap_flat = torch.zeros_like(tile_flat)
-            remap_flat[tile_indices] = mapped_flat
-            
-            corrected[:, :, c] = remap_flat.reshape(tile_channel.shape)
-        
-        return corrected.clamp(0, 1)
+        rgb = tile[..., :3]
+        rgb_ref = reference[..., :3]
+
+        lab = TiledImageColorCorrection._rgb_to_lab(rgb)           # [H, W, 3]
+        lab_ref = TiledImageColorCorrection._rgb_to_lab(rgb_ref)   # [H, W, 3]
+
+        corrected_lab = lab.clone()
+        for c in range(3):
+            src_flat = lab[..., c].flatten()
+            ref_flat = lab_ref[..., c].flatten()
+            corrected_lab[..., c] = TiledImageColorCorrection._match_channel_histogram(
+                src_flat, ref_flat, device
+            ).reshape(lab[..., c].shape)
+
+        corrected_rgb = TiledImageColorCorrection._lab_to_rgb(corrected_lab)
+
+        # Preserve alpha if present
+        if tile.shape[2] > 3:
+            corrected_rgb = torch.cat([corrected_rgb, tile[..., 3:]], dim=-1)
+
+        return corrected_rgb
     
+    @staticmethod
+    def _rgb_to_lab(img: torch.Tensor) -> torch.Tensor:
+        """
+        Convert linear-sRGB [H, W, 3] in [0,1] to CIE LAB [H, W, 3].
+        L in [0, 100], a/b roughly in [-128, 127].
+        Uses the standard D65 illuminant.
+        """
+        # --- sRGB gamma linearization ---
+        img = img.clamp(0.0, 1.0)
+        linear = torch.where(img <= 0.04045,
+                             img / 12.92,
+                             ((img + 0.055) / 1.055) ** 2.4)
+
+        # --- Linear RGB → CIE XYZ (D65) ---
+        M = torch.tensor([
+            [0.4124564, 0.3575761, 0.1804375],
+            [0.2126729, 0.7151522, 0.0721750],
+            [0.0193339, 0.1191920, 0.9503041],
+        ], dtype=img.dtype, device=img.device)
+        xyz = linear.reshape(-1, 3) @ M.T           # [N, 3]
+        xyz = xyz.reshape(img.shape)
+
+        # --- Normalize by D65 white point ---
+        white = torch.tensor([0.95047, 1.00000, 1.08883],
+                             dtype=img.dtype, device=img.device)
+        xyz = xyz / white
+
+        # --- CIE f function ---
+        delta = 6.0 / 29.0
+        f = torch.where(xyz > delta ** 3,
+                        xyz ** (1.0 / 3.0),
+                        xyz / (3.0 * delta ** 2) + 4.0 / 29.0)
+
+        L = 116.0 * f[..., 1] - 16.0
+        a = 500.0 * (f[..., 0] - f[..., 1])
+        b = 200.0 * (f[..., 1] - f[..., 2])
+        return torch.stack([L, a, b], dim=-1)
+
+    @staticmethod
+    def _lab_to_rgb(lab: torch.Tensor) -> torch.Tensor:
+        """
+        Convert CIE LAB [H, W, 3] back to sRGB [H, W, 3] in [0, 1].
+        """
+        L, a, b = lab[..., 0], lab[..., 1], lab[..., 2]
+        fy = (L + 16.0) / 116.0
+        fx = a / 500.0 + fy
+        fz = fy - b / 200.0
+
+        delta = 6.0 / 29.0
+        def f_inv(t):
+            return torch.where(t > delta,
+                               t ** 3,
+                               3.0 * delta ** 2 * (t - 4.0 / 29.0))
+
+        white = torch.tensor([0.95047, 1.00000, 1.08883],
+                             dtype=lab.dtype, device=lab.device)
+        xyz = torch.stack([f_inv(fx), f_inv(fy), f_inv(fz)], dim=-1) * white
+
+        # --- CIE XYZ → Linear RGB ---
+        M_inv = torch.tensor([
+            [ 3.2404542, -1.5371385, -0.4985314],
+            [-0.9692660,  1.8760108,  0.0415560],
+            [ 0.0556434, -0.2040259,  1.0572252],
+        ], dtype=lab.dtype, device=lab.device)
+        linear = xyz.reshape(-1, 3) @ M_inv.T
+        linear = linear.reshape(lab.shape)
+
+        # --- Linear → sRGB gamma ---
+        srgb = torch.where(linear <= 0.0031308,
+                           linear * 12.92,
+                           1.055 * linear.clamp(min=0.0) ** (1.0 / 2.4) - 0.055)
+        return srgb.clamp(0.0, 1.0)
+
     @staticmethod
     def _color_transfer(tile, reference, device):
         """
-        Transfer color statistics from reference to tile.
-        Matches mean and standard deviation of each channel independently.
-        Preserves relative color differences while shifting to reference color space.
+        Transfer color statistics from reference to tile using CIE LAB space.
+        
+        Implements the Reinhard et al. (2001) method: convert to LAB (perceptually
+        uniform, decorrelated channels), match mean & std per channel, convert back.
+        
+        Advantages over plain RGB stat matching:
+        - LAB channels are nearly decorrelated → per-channel correction doesn't
+          introduce spurious hue shifts.
+        - L, a, b carry luminance and chrominance separately, so the transfer is
+          perceptually meaningful.
+        - std ratio is clamped conservatively only when tile has negligible variance
+          to prevent noise amplification, not to cap the correction range.
         """
-        corrected = tile.clone()
-        C = tile.shape[2]
-        
-        for c in range(C):
-            tile_mean = tile[:, :, c].mean()
-            tile_std = tile[:, :, c].std()
-            ref_mean = reference[:, :, c].mean()
-            ref_std = reference[:, :, c].std()
-            
-            # Normalize tile to zero mean and unit variance
-            if tile_std > 1e-6:
-                normalized = (tile[:, :, c] - tile_mean) / (tile_std + 1e-8)
-            else:
-                normalized = tile[:, :, c] - tile_mean
-            
-            # Scale and shift to reference distribution
-            if ref_std > 1e-6:
-                corrected[:, :, c] = normalized * (ref_std + 1e-8) + ref_mean
-            else:
-                corrected[:, :, c] = normalized + ref_mean
-        
-        return corrected.clamp(0, 1)
+        rgb = tile[..., :3]
+        rgb_ref = reference[..., :3]
+
+        lab      = TiledImageColorCorrection._rgb_to_lab(rgb)
+        lab_ref  = TiledImageColorCorrection._rgb_to_lab(rgb_ref)
+
+        corrected_lab = lab.clone()
+        for c in range(3):
+            t_mean = lab[..., c].mean()
+            t_std  = lab[..., c].std().clamp(min=1e-6)
+            r_mean = lab_ref[..., c].mean()
+            r_std  = lab_ref[..., c].std().clamp(min=1e-6)
+
+            # Ratio cap: only prevent extreme noise amplification in near-flat regions
+            std_ratio = (r_std / t_std).clamp(max=4.0)
+
+            corrected_lab[..., c] = (lab[..., c] - t_mean) * std_ratio + r_mean
+
+        corrected_rgb = TiledImageColorCorrection._lab_to_rgb(corrected_lab)
+
+        # Preserve alpha if present
+        if tile.shape[2] > 3:
+            corrected_rgb = torch.cat([corrected_rgb, tile[..., 3:]], dim=-1)
+
+        return corrected_rgb
     
     @staticmethod
     def _luminance_correction(tile, reference, device):
         """
-        Correct only luminance (brightness) while preserving chrominance (color).
-        Uses region-level average luminance ratio to avoid per-pixel noise amplification.
-        Better for preserving local color characteristics while fixing brightness differences.
+        Correct luminance (brightness + contrast) while preserving chrominance (hue/saturation).
+
+        Improvements over the original ratio-only approach:
+        1. Uses perceptual luminance Y = 0.2126R + 0.7152G + 0.0722B (BT.709),
+           not a simple 3-channel average.
+        2. Matches both mean AND std of Y, so contrast differences are also corrected.
+        3. Applies correction per-pixel via the Y ratio map, keeping colour ratios
+           (Cb, Cr components) intact — true chrominance preservation.
+        4. Wider clamp range (0.1–10.0) to handle dark/bright mismatches without
+           artificially capping the correction.
         """
         corrected = tile.clone()
-        
-        if tile.shape[2] >= 3:
-            # Calculate region-level average luminance (more stable than per-pixel)
-            tile_lum_mean = tile[:, :, :3].mean()  # scalar
-            ref_lum_mean = reference[:, :, :3].mean()  # scalar
-            
-            # Prevent division by zero
-            tile_lum_mean = tile_lum_mean.clamp(min=1e-6)
-            
-            # Calculate global luminance ratio
-            lum_ratio = (ref_lum_mean / tile_lum_mean).clamp(0.5, 2.0)  # scalar
-            
-            # Apply luminance correction to RGB channels
-            corrected[:, :, :3] = (tile[:, :, :3] * lum_ratio).clamp(0, 1)
-            
-            # Keep alpha channel unchanged if present
-            if tile.shape[2] > 3:
-                corrected[:, :, 3:] = tile[:, :, 3:]
-        
+
+        if tile.shape[2] < 3:
+            return corrected
+
+        rgb     = tile[..., :3]          # [H, W, 3]
+        rgb_ref = reference[..., :3]
+
+        # BT.709 luminance coefficients
+        lum_w = torch.tensor([0.2126, 0.7152, 0.0722],
+                             dtype=rgb.dtype, device=device)
+
+        # Per-pixel luminance maps
+        tile_Y = (rgb     * lum_w).sum(dim=-1, keepdim=True).clamp(min=1e-7)  # [H, W, 1]
+        ref_Y  = (rgb_ref * lum_w).sum(dim=-1, keepdim=True).clamp(min=1e-7)
+
+        # Match mean and std of Y
+        t_mean = tile_Y.mean()
+        t_std  = tile_Y.std().clamp(min=1e-6)
+        r_mean = ref_Y.mean()
+        r_std  = ref_Y.std().clamp(min=1e-6)
+
+        # Target per-pixel Y: same relative structure, shifted to reference distribution
+        target_Y = (tile_Y - t_mean) * (r_std / t_std) + r_mean
+        target_Y = target_Y.clamp(min=1e-7)
+
+        # Per-pixel scaling ratio — preserves chrominance by scaling all channels equally
+        ratio = (target_Y / tile_Y).clamp(0.1, 10.0)   # wide range, no artificial cap
+
+        corrected[..., :3] = (rgb * ratio).clamp(0.0, 1.0)
+
+        # Keep alpha unchanged if present
+        if tile.shape[2] > 3:
+            corrected[..., 3:] = tile[..., 3:]
+
         return corrected
+    
+    @staticmethod
+    def _edge_preserving_smooth(tile, strength, device):
+        """
+        Apply edge-preserving smoothing to reduce color artifacts while maintaining detail.
+        
+        Uses a guided filter approach with spatial and range components to smooth
+        color artifacts while preserving edges and fine details.
+        
+        Args:
+            tile: Input image [H, W, C]
+            strength: Smoothing strength (0-1)
+            device: torch device
+            
+        Returns:
+            Smoothed image [H, W, C]
+        """
+        if strength <= 0:
+            return tile
+        
+        # Only process RGB channels
+        if tile.shape[2] < 3:
+            return tile
+        
+        rgb = tile[..., :3].clone()  # [H, W, 3]
+        H, W = rgb.shape[0], rgb.shape[1]
+        
+        # Adaptive kernel size and sigma based on strength
+        kernel_size = int(3 + strength * 6)  # 3-9 pixels
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        
+        sigma_range = 0.05 + strength * 0.15   # Color similarity sigma
+        
+        # Convert to [C, H, W] for processing
+        rgb_chw = rgb.permute(2, 0, 1)  # [3, H, W]
+        
+        # Simple domain transform based smoothing (faster approximation of bilateral)
+        # Iterate with increasing radius for better edge preservation
+        smoothed = rgb_chw.clone()
+        
+        num_iterations = max(1, int(strength * 3))  # 1-3 iterations
+        
+        for _ in range(num_iterations):
+            # Compute spatial averages with varying kernel
+            padded = torch.nn.functional.pad(smoothed, (kernel_size//2, kernel_size//2, kernel_size//2, kernel_size//2), mode='reflect')
+            
+            # Create simple box filter kernel
+            kernel_1d = torch.ones(kernel_size, device=device, dtype=torch.float32) / kernel_size
+            kernel_2d = kernel_1d[None, :] * kernel_1d[:, None]  # [K, K]
+            kernel_2d = kernel_2d.unsqueeze(0).unsqueeze(0)  # [1, 1, K, K]
+            
+            # Apply separable filtering for efficiency
+            # Horizontal pass
+            h_smoothed = torch.nn.functional.conv2d(
+                padded.unsqueeze(0),  # [1, 3, H_pad, W_pad]
+                kernel_2d.repeat(3, 1, 1, 1),  # [3, 1, K, K]
+                groups=3,
+                padding=0
+            ).squeeze(0)  # [3, H, W]
+            
+            # Compute edge weights based on color difference
+            color_diff = (h_smoothed - smoothed).abs().mean(dim=0, keepdim=True)  # [1, H, W]
+            edge_weight = torch.exp(-color_diff / sigma_range)  # High weight for similar colors
+            
+            # Blend smoothed with original based on edge detection
+            # Strong edges (large color diff) -> low weight -> keep original
+            # Flat regions (small color diff) -> high weight -> use smoothed
+            smoothed = torch.lerp(smoothed, h_smoothed, edge_weight * strength)
+        
+        # Convert back to [H, W, C]
+        smoothed_rgb = smoothed.permute(1, 2, 0)  # [H, W, 3]
+        
+        # Preserve alpha if present
+        if tile.shape[2] > 3:
+            result = torch.cat([smoothed_rgb, tile[..., 3:]], dim=-1)
+        else:
+            result = smoothed_rgb
+        
+        return result.clamp(0, 1)
 
 # ==========================================
 # Image Crop Utilities
@@ -1098,13 +1353,14 @@ class ImageCropTiles(io.ComfyNode):
             inputs=[
                 io.Image.Input("image", optional=False),
                 io.Int.Input("tile_size", default=1024, min=512, max=4096, step=64),
-                io.Int.Input("overlap", default=64, min=64, max=256, step=64),
-                io.Float.Input("overlap_feather_rate", default=1.0, min=0.1, max=4.0, step=0.1, tooltip="Feathering rate multiplier."),
+                io.Int.Input("overlap", default=128, min=64, max=256, step=64),
+                io.Float.Input("overlap_feather_rate", default=2.0, min=0.1, max=4.0, step=0.1,
+                               tooltip="Feather width = overlap × rate. rate=1.0: feather only within overlap zone; rate=2.0 (recommended): extends 1× overlap beyond the boundary for smooth blending."),
                 io.Boolean.Input("adaptable_tile_size", default=True),
                 io.Float.Input("adaptable_max_deviation_ratio", default=0.25, min=0.1, max=0.5, step=0.05),
                 io.Float.Input("adaptable_max_aspect_ratio", default=1.33, min=1.0, max=2.0, step=0.01, 
                                tooltip="Max aspect ratio (W/H or H/W) for adaptable tile sizing.\n5:4=1.25, 4:3=1.33, 16:9=1.78, 21:9=2.33."),
-                io.Int.Input("pixel_alignment", default=8, min=8, max=256, step=8, tooltip="Align tile dimensions to multiples of this value (e.g., 8 for SDXL, 16 for FLUX.2)."),
+                io.Int.Input("pixel_alignment", default=8, min=8, max=256, step=8, tooltip=TILE_ALIGMENT_TIP   ),
             ],
             outputs=[
                 io.Image.Output(display_name="tiled_images"),                             
@@ -1183,14 +1439,14 @@ class ImageCropTilesByPixels(io.ComfyNode):
                 io.Image.Input("image", optional=False),
                 io.Float.Input("max_pixels_per_tile", default=1.5, min=1.0, max=8.0, step=0.1,
                             tooltip="Maximum pixels per tile in millions (e.g., 1.0M = 1048576 pixels = 1024x1024)."),                
-                io.Int.Input("overlap", default=64, min=64, max=256, step=64),
-                io.Float.Input("overlap_feather_rate", default=1.0, min=0.1, max=4.0, step=0.1, 
-                               tooltip="Feathering rate multiplier."),
+                io.Int.Input("overlap", default=128, min=64, max=256, step=64),
+                io.Float.Input("overlap_feather_rate", default=2.0, min=0.1, max=4.0, step=0.1,
+                               tooltip="Feather width = overlap × rate. rate=1.0: feather only within overlap zone; rate=2.0 (recommended): extends 1× overlap beyond the boundary for smooth blending."),
                 io.Boolean.Input("adaptable_tile_size", default=True),
                 io.Float.Input("adaptable_max_deviation_ratio", default=0.25, min=0.1, max=0.5, step=0.05),
                 io.Float.Input("adaptable_max_aspect_ratio", default=1.33, min=1.0, max=2.0, step=0.01, 
                                tooltip="Max aspect ratio (W/H or H/W) for adaptable tile sizing.\n5:4=1.25, 4:3=1.33, 16:9=1.78, 21:9=2.33."),
-                io.Int.Input("pixel_alignment", default=8, min=8, max=256, step=8, tooltip="Align tile dimensions to multiples of this value (e.g., 8 for SDXL, 16 for FLUX.2)."   ),
+                io.Int.Input("pixel_alignment", default=8, min=8, max=256, step=8, tooltip=TILE_ALIGMENT_TIP   ),
             ],
             outputs=[
                 io.Image.Output(display_name="tiled_images"),                             
@@ -1300,12 +1556,13 @@ class LatentUpscaleAndCropTiles(io.ComfyNode):
                 io.Float.Input("noise_strength", default=0.0, min=0.0, max=1.0, step=0.01),
                 io.Int.Input("seed", default=0, min=0, max=0xffffffffffffffff),
                 io.Int.Input("tile_size", default=1024, min=512, max=4096, step=64),
-                io.Int.Input("overlap", default=64, min=64, max=256, step=64),
-                io.Float.Input("overlap_feather_rate", default=1.0, min=0.1, max=4.0, step=0.1),
+                io.Int.Input("overlap", default=128, min=64, max=256, step=64),
+                io.Float.Input("overlap_feather_rate", default=2.0, min=0.1, max=4.0, step=0.1,
+                               tooltip="Feather width = overlap × rate. rate=2.0 (recommended) for overlap=64 gives feather=128px."),
                 io.Boolean.Input("adaptable_tile_size", default=True),
                 io.Float.Input("adaptable_max_deviation_ratio", default=0.25, step=0.05),
                 io.Float.Input("adaptable_max_aspect_ratio", default=1.33, step=0.01),
-                io.Int.Input("pixel_alignment", default=8, tooltip="8 for SD1.5/SDXL, 16 for FLUX."),
+                io.Int.Input("pixel_alignment", default=8, min=8, max=256, step=8, tooltip=TILE_ALIGMENT_TIP   ),
             ],
             outputs=[
                 io.Latent.Output(display_name="tiled_latents"),
@@ -1486,132 +1743,4 @@ class LatentUpscaleAndCropTiles(io.ComfyNode):
             {"samples": original_tiled_output},
             pipeline, info, tile_size, orig_width_px, orig_height_px
         )
-    
-class LatentUpscaleSimple(io.ComfyNode):
-    """
-    Upscales input latent.
-    """
-    @classmethod
-    def define_schema(cls):
-        return io.Schema(
-            node_id="LatentUpscaleSimple_MiraSubPack",
-            display_name="Latent Upscale with Add noise",
-            category=CAT,
-            description="Upscale latent.",
-            inputs=[
-                io.Latent.Input("latent", optional=False, tooltip="Input latent to upscale and tile."),
-                io.Float.Input("scale_factor", default=1.25, min=0.5, max=8.0, step=0.05,
-                              tooltip="Upscaling factor (e.g., 2.0 = double size)."),
-                io.Combo.Input("upscale_method", default="nearest",
-                              options=["nearest", "bilinear", "bicubic", "area", "nearest-exact"],
-                              tooltip="Interpolation method for upscaling."),
-                io.Boolean.Input("multi_stage", default=True,
-                                tooltip="Use multi-stage upscaling for factors > 2.0 (smoother results)."),
-                io.Float.Input("noise_strength", default=0.0, min=0.0, max=1.0, step=0.01,
-                              tooltip="Add noise to upscaled latent (helps with detail generation)."),
-                io.Int.Input("seed", default=0, min=0, max=0xffffffffffffffff,
-                            tooltip="Seed for noise generation."),
-                io.Int.Input("pixel_alignment", default=8, min=8, max=256, step=8, tooltip="Align dimensions to multiples of this value (e.g., 8 for SDXL, 16 for FLUX.2)."   ),
-            ],
-            outputs=[
-                io.Latent.Output(display_name="sample"),             
-            ],
-            is_output_node=True
-        )
-    
-    @classmethod
-    def execute(cls, latent, scale_factor, upscale_method, multi_stage, noise_strength, seed, pixel_alignment) -> io.NodeOutput:
-        """
-        Upscale latent and add noise.
-        """
-        samples = latent["samples"]
-        B, C, latent_h, latent_w = samples.shape
-        
-        # Original dimensions in pixel space
-        orig_width = latent_w * pixel_alignment
-        orig_height = latent_h * pixel_alignment
-        
-        # Calculate ideal target dimensions
-        ideal_width = orig_width * scale_factor
-        ideal_height = orig_height * scale_factor
-        
-        # Align to pixel_alignment
-        new_width = (int(ideal_width) // pixel_alignment) * pixel_alignment
-        new_height = (int(ideal_height) // pixel_alignment) * pixel_alignment
-        new_width = max(pixel_alignment, new_width)
-        new_height = max(pixel_alignment, new_height)
-        
-        # Calculate actual scale factors after alignment
-        actual_scale_w = new_width / orig_width
-        actual_scale_h = new_height / orig_height
-        actual_scale_factor = (actual_scale_w + actual_scale_h) / 2
-        
-        # Warn if scale factor was adjusted significantly
-        scale_diff = abs(actual_scale_factor - scale_factor)
-        if scale_diff > 0.01:  # More than 1% difference
-            print("[MiraSubPack:LatentUpscaleSimple] ⚠ Scale factor adjusted for pixel alignment:")
-            print(f"  Requested: {scale_factor:.4f}x")
-            print(f"  Actual: {actual_scale_factor:.4f}x (W: {actual_scale_w:.4f}x, H: {actual_scale_h:.4f}x)")
-            print(f"  Original: {orig_width}x{orig_height} → Target: {new_width}x{new_height}")
-            print(f"  Pixel alignment: {pixel_alignment}")
-        
-        new_latent_w = new_width // pixel_alignment
-        new_latent_h = new_height // pixel_alignment
-        
-        print("[MiraSubPack:LatentUpscalerAdvanced] Upscaling latent:")
-        print(f"  Original: {orig_width}x{orig_height} ({latent_w}x{latent_h} latent)")
-        print(f"  Target: {new_width}x{new_height} ({new_latent_w}x{new_latent_h} latent)")
-        print(f"  Scale: {actual_scale_factor:.3f}x")
-        print(f"  Method: {upscale_method}")
-        
-        # Perform upscaling
-        current_samples = samples
-        
-        if multi_stage and scale_factor >= 2.0:
-            # Multi-stage upscaling
-            stages = []
-            remaining_scale = scale_factor
-            
-            while remaining_scale >= 2.0:
-                stages.append(2.0)
-                remaining_scale /= 2.0
-            
-            if remaining_scale > 1.0:
-                stages.append(remaining_scale)
-            
-            print(f"  Multi-stage: {len(stages)} stages {stages}")
-            
-            for i, stage_scale in enumerate(stages):
-                current_h = current_samples.shape[2]
-                current_w = current_samples.shape[3]
-                stage_h = int(current_h * stage_scale)
-                stage_w = int(current_w * stage_scale)
-                
-                current_samples = torch.nn.functional.interpolate(
-                    current_samples,
-                    size=(stage_h, stage_w),
-                    mode=upscale_method,
-                    align_corners=False if upscale_method in ["bilinear", "bicubic"] else None
-                )
-                
-                print(f"    Stage {i+1}: {current_h}x{current_w} -> {stage_h}x{stage_w}")
-        else:
-            # Single-stage upscaling
-            current_samples = torch.nn.functional.interpolate(
-                current_samples,
-                size=(new_latent_h, new_latent_w),
-                mode=upscale_method,
-                align_corners=False if upscale_method in ["bilinear", "bicubic"] else None
-            )
-        
-        # Add noise if requested
-        if noise_strength > 0:
-            noise = torch.randn(current_samples.shape, dtype=current_samples.dtype, device=current_samples.device, generator=torch.manual_seed(seed+1))
-            current_samples = current_samples + noise * noise_strength
-            print(f"  Added noise: strength={noise_strength:.3f}, seed={seed}")
-        
-        # Now split the upscaled latent into tiles
-        upscaled_latent = current_samples[0]  # [C, H, W]
-                
-        return io.NodeOutput({"samples": upscaled_latent.unsqueeze(0)})
     
