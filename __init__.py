@@ -1,5 +1,6 @@
 from .JoyCaption.beta_one import JoyCaptionNodeBetaOne, JoyCaptionBetaOneSimpleNode
-from .QwenImage.nodes_qwen import TextEncodeQwenImageEditMod, TextEncodeQwenImageEditPlusMod 
+from .QwenImage.nodes_qwen import TextEncodeQwenImageEditMod, TextEncodeQwenImageEditPlusMod
+from .QwenImage.nodes_qwen3vl import Qwen3VLNode
 from .image_util import ImageMergeByPixelAlign
 from .image_tiled_upscaler import MiraITUPipelineExtract, MiraITUPipelineCombine, ImageTiledKSamplerWithTagger, OverlappedImageMerge, OverlappedLatentMerge, \
     TiledImageColorCorrection, ImageCropTiles, ImageCropTilesByPixels, LatentUpscaleAndCropTiles, LatentUpscaleSimple
@@ -15,6 +16,8 @@ NODE_CLASS_MAPPINGS = {
     
     "TextEncodeQwenImageEdit_MiraSubPack": TextEncodeQwenImageEditMod,
     "TextEncodeQwenImageEditPlus_MiraSubPack": TextEncodeQwenImageEditPlusMod,
+
+    "Qwen3VL_MiraSubPack": Qwen3VLNode,
     
     "ImageMergeByPixelAlign_MiraSubPack": ImageMergeByPixelAlign,
     
@@ -34,8 +37,10 @@ NODE_CLASS_MAPPINGS = {
 }    
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "JoyCaptionNodeBetaOne_MiraSubPack": "JoyCaption Beta One (External LLaMA)",
-    "JoyCaptionBetaOneSimple_MiraSubPack": "JoyCaption Beta One Simple (External LLaMA)",
+    "JoyCaptionNodeBetaOne_MiraSubPack": "JoyCaption Beta One (External llama.cpp)",
+    "JoyCaptionBetaOneSimple_MiraSubPack": "JoyCaption Beta One Simple (External llama.cpp)",
+    
+    "Qwen3VL_MiraSubPack": "Qwen3VL (External llama.cpp)",
     
     "TextEncodeQwenImageEdit_MiraSubPack": "Text Encode QwenImage Edit Mira",
     "TextEncodeQwenImageEditPlus_MiraSubPack": "Text Encode QwenImage Edit Plus Mira",

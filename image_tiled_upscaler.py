@@ -394,6 +394,19 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
                 io.Combo.Input("sampler_name", default="euler_ancestral", options=comfy.samplers.KSampler.SAMPLERS),
                 io.Combo.Input("scheduler", default="beta", options=comfy.samplers.KSampler.SCHEDULERS),
                 io.Float.Input("denoise", default=0.35, min=0.0, max=1.0, step=0.01),
+                io.Float.Input("noise_boost", default=0.0, min=0.0, max=1.0, step=0.05,
+                    tooltip="Extra noise injected into ref_latents before conditioning to encourage detail generation.\n"
+                            "Perturbs the reference that guides generation, effective even at denoise=1.0.\n"
+                            "0.0 = no boost (original behavior), 0.1~0.3 = subtle detail enhancement,\n"
+                            "0.3~0.6 = moderate (recommended for upscale with ref_latents),\n"
+                            "0.6~1.0 = aggressive (more creative, may deviate from original).\n"
+                            "Only effective when ref_latents is connected."),
+                io.Combo.Input("noise_injection_method", default="adaptive",
+                    options=["uniform", "high_frequency", "adaptive"],
+                    tooltip="Noise injection method:\n"
+                            "uniform: Standard Gaussian noise, uniform across all regions.\n"
+                            "high_frequency: Emphasizes high-frequency detail noise, better for textures.\n"
+                            "adaptive: Adds more noise to flat/blurry regions, less to detailed areas (recommended)."),
                 io.Clip.Input("clip_negative", optional=True),
                 io.Latent.Input("ref_latents", optional=True),
             ],
@@ -404,7 +417,8 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
     
     @classmethod
     def execute(cls, model, clip, tiled_samples, common_positive, common_negative, tagger_text,
-               seed, steps, cfg, sampler_name, scheduler, denoise, clip_negative = None, ref_latents = None
+               seed, steps, cfg, sampler_name, scheduler, denoise, noise_boost=0.0, noise_injection_method="adaptive",
+               clip_negative = None, ref_latents = None
                ) -> io.NodeOutput:
         negative_conditioning = None
         if clip_negative:
@@ -422,6 +436,9 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
         
         if ref_latents is not None:
             print("    >Using provided reference latents for this tile.")
+        
+        if noise_boost > 0:
+            print(f"[MiraSubPack:AutoTiledTagger] Noise boost: {noise_boost:.2f}, method: {noise_injection_method}")
                             
         # Parse tagger text mapping
         mapping = tagger_text.splitlines()
@@ -451,6 +468,17 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
                     print(f"    >Warning: ref_latents count {len(all_ref_latent)} does not match batch_latents count {len(batch_latents)}. Using the first ref_latent for all tiles.")
                     ref_latent = all_ref_latent[0].unsqueeze(0)
                 
+                # Inject noise into ref_latent (not single_latent) to perturb the reference
+                # that guides generation. At high denoise (e.g. 1.0), single_latent is replaced
+                # by pure noise, so injecting there is meaningless. The ref_latent is what
+                # actually anchors the output via conditioning - perturbing it gives the model
+                # freedom to generate new details instead of faithfully reproducing the blurry original.
+                if noise_boost > 0:
+                    ref_latent = cls._inject_noise(
+                        ref_latent, noise_boost, noise_injection_method, seed + idx
+                    )
+                    print(f"    Noise boost applied to ref_latent (boost={noise_boost:.2f}, method={noise_injection_method})")
+                
                 if clip_negative:
                     negative_tokens = clip_negative.tokenize(common_negative)
                     negative_conditioning = clip_negative.encode_from_tokens_scheduled(negative_tokens)    
@@ -465,7 +493,8 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
                 del negative_tokens
                 torch.cuda.empty_cache()                        
             
-            single_latent = batch_latents[idx].unsqueeze(0)  # [C, H, W] -> [1, C, H, W]                
+            single_latent = batch_latents[idx].unsqueeze(0)  # [C, H, W] -> [1, C, H, W]
+                
             print(f"  > Sampling Tile {idx+1}/{len(batch_latents)}: {single_latent.shape[3]}x{single_latent.shape[2]}")
             print(f"    Tile latent shape: {single_latent.shape}")
             sampled_tile = cls._sample_single(
@@ -493,6 +522,82 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
              cropped = torch.nn.functional.pad(cropped, (0, max(0, pad_w), 0, max(0, pad_h)), mode='replicate')
         return {"samples": cropped}        
             
+    @staticmethod
+    def _inject_noise(latent, noise_boost, method, seed):
+        """
+        Inject additional noise into latent to encourage detail generation.
+        This perturbs the starting point away from the blurry original,
+        giving the sampler more room to reconstruct with enhanced detail.
+        
+        Args:
+            latent: Input latent tensor [1, C, H, W]
+            noise_boost: Strength of noise injection (0.0 to 1.0)
+            method: 'uniform', 'high_frequency', or 'adaptive'
+            seed: Random seed for reproducibility
+        """
+        generator = torch.manual_seed(seed)
+        l = latent.clone()
+        
+        # Scale noise relative to the latent's own magnitude
+        latent_std = l.std().clamp(min=1e-6)
+        
+        if method == "uniform":
+            # Standard Gaussian noise scaled by latent statistics
+            boost_noise = torch.randn(l.shape, dtype=l.dtype, device=l.device, generator=generator)
+            l = l + boost_noise * latent_std * noise_boost
+            
+        elif method == "high_frequency":
+            # Generate noise, then subtract a blurred version to keep only high-frequency components.
+            # This emphasizes texture/detail-scale perturbations rather than broad color shifts.
+            raw_noise = torch.randn(l.shape, dtype=l.dtype, device=l.device, generator=generator)
+            
+            # Simple box-blur approximation for low-frequency extraction (kernel_size=5)
+            kernel_size = 5
+            padding = kernel_size // 2
+            # Average pool each channel to get low-frequency component
+            low_freq = torch.nn.functional.avg_pool2d(
+                raw_noise, kernel_size=kernel_size, stride=1, padding=padding
+            )
+            # High-frequency = original - low_frequency
+            hf_noise = raw_noise - low_freq
+            # Normalize to unit variance for consistent scaling
+            hf_std = hf_noise.std().clamp(min=1e-6)
+            hf_noise = hf_noise / hf_std
+            
+            l = l + hf_noise * latent_std * noise_boost * 1.5  # 1.5x because HF noise is weaker perceptually
+            
+        elif method == "adaptive":
+            # Add more noise to flat/blurry regions (low local variance),
+            # less noise to regions that already have detail (high local variance).
+            # This targets exactly the areas that need more detail generation.
+            raw_noise = torch.randn(l.shape, dtype=l.dtype, device=l.device, generator=generator)
+            
+            # Compute local variance using a sliding window
+            kernel_size = 7
+            padding = kernel_size // 2
+            
+            # Local mean and variance
+            local_mean = torch.nn.functional.avg_pool2d(
+                l, kernel_size=kernel_size, stride=1, padding=padding
+            )
+            local_var = torch.nn.functional.avg_pool2d(
+                (l - local_mean) ** 2, kernel_size=kernel_size, stride=1, padding=padding
+            )
+            
+            # Inverse variance map: high where flat, low where detailed
+            # Normalize to [0, 1] range
+            local_std = (local_var + 1e-8).sqrt()
+            max_std = local_std.amax(dim=(-2, -1), keepdim=True).clamp(min=1e-6)
+            detail_map = local_std / max_std  # 0=flat, 1=detailed
+            
+            # Invert: more noise where flat (detail_map is low)
+            # Use smooth ramp: flat areas get up to 2x boost, detailed areas get 0.3x
+            noise_scale = 0.3 + 1.7 * (1.0 - detail_map.clamp(0, 1))
+            
+            l = l + raw_noise * latent_std * noise_boost * noise_scale
+        
+        return l
+    
     @staticmethod
     def _sample_single(model, positive, negative, latent, seed, steps, cfg, sampler_name, scheduler, denoise):
         l = latent["samples"]
@@ -756,8 +861,8 @@ class TiledImageColorCorrection(io.ComfyNode):
                     default="histogram_match",
                     options=["histogram_match", "color_transfer", "luminance_only"],
                     tooltip="Histogram Match: Full distribution matching\nColor Transfer: Mean & Std deviation matching\nLuminance Only: Brightness correction only"),
-                io.Float.Input("correction_strength", default=1, min=0.0, max=1.0, step=0.1,
-                    tooltip="Blend strength: 0=no correction, 1=full correction."),
+                io.Float.Input("correction_strength", default=1, min=0.0, max=3.0, step=0.1,
+                    tooltip="Blend strength: 0=no correction, 1=full correction, >1=over-correction (extrapolation)."),
                 io.Boolean.Input("debug_output", default=False, tooltip="Print detailed correction info."),
             ],
             outputs=[
@@ -861,8 +966,8 @@ class TiledImageColorCorrection(io.ComfyNode):
             correction_stats["mean_delta"] += delta
             correction_stats["max_delta"] = max(correction_stats["max_delta"], delta)
             
-            # Blend with original tile
-            corrected_tile = torch.lerp(tile, corrected_tile, correction_strength)
+            # Blend with original tile (values > 1.0 extrapolate for stronger correction)
+            corrected_tile = torch.lerp(tile, corrected_tile, correction_strength).clamp(0, 1)
             corrected_tiles.append(corrected_tile)
             
             if debug_output and (idx % max(1, N // 10) == 0 or idx == N - 1):

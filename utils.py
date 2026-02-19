@@ -37,7 +37,10 @@ class VAEEncode_Mira(io.ComfyNode):
         # If only single image, use standard encoding
         if batch_size == 1:
             latent = vae.encode(pixels)
-            return io.NodeOutput(latent)
+            latents = {
+                'samples': latent
+            }  
+            return io.NodeOutput(latents)
         
         # For multiple images, process each separately to save VRAM
         latent_list = []        
