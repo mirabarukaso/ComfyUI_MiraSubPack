@@ -1110,6 +1110,7 @@ class ImageCropTiles(io.ComfyNode):
                 io.Image.Output(display_name="tiled_images"),                             
                 MiraITUPipeline.Output(display_name="mira_itu_pipeline"),
                 io.String.Output(display_name="mira_itu_pipeline_info"),
+                io.Image.Output(display_name="cropped_full_image"),
             ],
             is_output_node=True
         )
@@ -1162,7 +1163,9 @@ class ImageCropTiles(io.ComfyNode):
         cropped_tiles = torch.stack(tile_list, dim=0)
         pipeline = (W, H, effective_tile_width, effective_tile_height, overlap, overlap_feather_rate, pixel_alignment)
         upscaled_pipeline_info = f"Full: {W}x{H}\nTile: {len(tiles)} -> {effective_tile_width}x{effective_tile_height}\nOverlap: {overlap}\nFeatherRate: {overlap_feather_rate}\nOriginalTileSize: {tile_size}\nAdaptable: {adaptable_tile_size}\nMaxDeviationRatio: {adaptable_max_deviation_ratio}\nMaxAspectRatio: {adaptable_max_aspect_ratio}\nPixelAlignment: {pixel_alignment}"
-        return io.NodeOutput(cropped_tiles, pipeline, upscaled_pipeline_info)    
+        # Output the cropped full image for color correction reference
+        cropped_full_image = source.unsqueeze(0)  # [H, W, C] -> [1, H, W, C]
+        return io.NodeOutput(cropped_tiles, pipeline, upscaled_pipeline_info, cropped_full_image)    
 
 class ImageCropTilesByPixels(io.ComfyNode):
     """
@@ -1193,6 +1196,7 @@ class ImageCropTilesByPixels(io.ComfyNode):
                 io.Image.Output(display_name="tiled_images"),                             
                 MiraITUPipeline.Output(display_name="mira_itu_pipeline"),
                 io.String.Output(display_name="mira_itu_pipeline_info"),
+                io.Image.Output(display_name="cropped_full_image"),
             ],
             is_output_node=True
         )
@@ -1263,7 +1267,9 @@ class ImageCropTilesByPixels(io.ComfyNode):
         pipeline = (W, H, effective_tile_width, effective_tile_height, overlap, overlap_feather_rate, pixel_alignment)
         upscaled_pipeline_info = f"Full: {W}x{H}\nTile: {len(tiles)} -> {effective_tile_width}x{effective_tile_height}\nOverlap: {overlap}\nFeatherRate: {overlap_feather_rate}\nMaxPixelsPerTile: {max_pixels_per_tile}M\nAdaptable: {adaptable_tile_size}\nMaxDeviationRatio: {adaptable_max_deviation_ratio}\nMaxAspectRatio: {adaptable_max_aspect_ratio}\nPixelAlignment: {pixel_alignment}"
         print(upscaled_pipeline_info)
-        return io.NodeOutput(cropped_tiles, pipeline, upscaled_pipeline_info)    
+        # Output the cropped full image for color correction reference
+        cropped_full_image = source.unsqueeze(0)  # [H, W, C] -> [1, H, W, C]
+        return io.NodeOutput(cropped_tiles, pipeline, upscaled_pipeline_info, cropped_full_image)    
     
 # ==========================================
 # Latent Crop Utilities - Optimized Version
