@@ -3,7 +3,7 @@ from .QwenImage.nodes_qwen import TextEncodeQwenImageEditMod, TextEncodeQwenImag
 from .QwenImage.nodes_qwen3vl import Qwen3VLNode
 from .image_util import ImageMergeByPixelAlign
 from .image_tiled_upscaler import MiraITUPipelineExtract, MiraITUPipelineCombine, ImageTiledKSamplerWithTagger, OverlappedImageMerge, OverlappedLatentMerge, \
-    TiledImageColorCorrection, ImageCropTiles, ImageCropTilesByPixels, LatentUpscaleAndCropTiles
+    TiledImageColorCorrection, ImageCropTiles, ImageCropTilesByPixels, LatentUpscaleAndCropTiles, MiraImageUpscaleCalculator
 from .utils import VAEEncode_Mira, VAEDecode_Mira
 
 
@@ -30,6 +30,7 @@ NODE_CLASS_MAPPINGS = {
     "ImageCropTiles_MiraSubPack": ImageCropTiles,
     "ImageCropTilesByPixels_MiraSubPack": ImageCropTilesByPixels,
     "LatentUpscaleAndCropTiles_MiraSubPack": LatentUpscaleAndCropTiles,
+    "MiraImageUpscaleCalculator_MiraSubPack": MiraImageUpscaleCalculator,
     
     "VAEEncode_MiraSubPack": VAEEncode_Mira,
     "VAEDecode_MiraSubPack": VAEDecode_Mira,
@@ -55,6 +56,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ImageCropTiles_MiraSubPack": "Image Crop to Tiles",
     "ImageCropTilesByPixels_MiraSubPack": "Image Crop to Tiles by Pixels",
     "LatentUpscaleAndCropTiles_MiraSubPack": "Latent Upscale then Crop to Tiles",
+    "MiraImageUpscaleCalculator_MiraSubPack": "Mira Image Upscale Calculator",
     
     "VAEEncode_MiraSubPack": "VAE Encode (Mira SubPack)",
     "VAEDecode_MiraSubPack": "VAE Decode (Mira SubPack)",

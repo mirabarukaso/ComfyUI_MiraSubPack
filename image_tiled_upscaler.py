@@ -2,6 +2,7 @@ import torch
 import math
 import comfy.sample
 import comfy.samplers
+import comfy.utils
 import latent_preview
 from comfy_api.latest import io
 import node_helpers
@@ -1743,4 +1744,101 @@ class LatentUpscaleAndCropTiles(io.ComfyNode):
             {"samples": original_tiled_output},
             pipeline, info, tile_size, orig_width_px, orig_height_px
         )
+
+# ==========================================
+# Upscale Factor Calculator
+# ==========================================
+class MiraImageUpscaleCalculator(io.ComfyNode):
+    """
+    Recalculate upscale factor and resize image if it exceeds pixel limit.
+    """
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MiraImageUpscaleCalculator_MiraSubPack",
+            display_name="Mira Image Upscale Calculator",
+            category=CAT,
+            description="Recalculate upscale factor and resize image if it exceeds pixel limit.",
+            inputs=[
+                io.Image.Input("image", tooltip="Input image."),
+                io.Float.Input("target_upscale_factor", default=2.0, min=1.0, max=16.0, step=0.1, tooltip="Target upscale factor relative to the ORIGINAL image size."),
+                io.Float.Input("limit_megapixels", default=4.0, min=1, max=64.0, step=0.5, tooltip="Maximum allowed megapixels for the input image. If exceeded, image is downscaled to fit."),
+                io.Int.Input("pixel_alignment", default=8, min=8, max=128, step=8, tooltip="Pixel alignment for resizing."),
+                io.Combo.Input("downscale_method", default="bicubic", options=["nearest-exact", "bilinear", "area", "bicubic", "lanczos"], tooltip="Method for downscaling if limit is exceeded."),
+            ],
+            outputs=[
+                io.Image.Output(display_name="processed_image"),
+                io.Float.Output(display_name="new_upscale_factor"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, image, target_upscale_factor, limit_megapixels, pixel_alignment, downscale_method) -> io.NodeOutput:
+        N, H, W, C = image.shape
+        limit_pixels = int(limit_megapixels * 1024 * 1024)
+
+        # 0. Center Crop to pixel_alignment BEFORE any calculation
+        # This matches VAE behavior which might crop if not aligned.
+        aligned_width = (W // pixel_alignment) * pixel_alignment
+        aligned_height = (H // pixel_alignment) * pixel_alignment
+        
+        if aligned_width != W or aligned_height != H:
+            print(f"[MiraSubPack:UpscaleCalculator] aligning input image to {pixel_alignment}px grid...")
+            crop_h = H - aligned_height
+            crop_w = W - aligned_width
+            
+            # Center crop logic
+            top = crop_h // 2
+            left = crop_w // 2
+            
+            # Perform crop on the batch [N, H, W, C]
+            image = image[:, top:top+aligned_height, left:left+aligned_width, :]
+            
+            # Update Dimensions
+            print(f"  Cropped Input: {aligned_width}x{aligned_height} (Original: {W}x{H})")
+            H, W = aligned_height, aligned_width
+
+        current_pixels = W * H
+        
+        # Calculate original target dimensions
+        target_width = int(round(W * target_upscale_factor))
+        target_height = int(round(H * target_upscale_factor))
+        
+        # Align target dimensions to pixel_alignment
+        target_width = (target_width // pixel_alignment) * pixel_alignment
+        target_height = (target_height // pixel_alignment) * pixel_alignment
+        
+        if current_pixels <= limit_pixels:
+            print(f"[MiraSubPack:UpscaleCalculator] Image size {W}x{H} ({current_pixels/1e6:.2f}MP) is within limit {limit_megapixels}MP.")
+            return io.NodeOutput(image, target_upscale_factor)
+            
+        print(f"[MiraSubPack:UpscaleCalculator] Image size {W}x{H} ({current_pixels/1e6:.2f}MP) exceeds limit {limit_megapixels}MP. Downscaling...")
+        
+        scale = math.sqrt(limit_pixels / current_pixels)
+        new_width = int(W * scale)
+        new_height = int(H * scale)
+        
+        # Align new dimensions
+        new_width = (new_width // pixel_alignment) * pixel_alignment
+        new_height = (new_height // pixel_alignment) * pixel_alignment
+        
+        # Ensure at least 1 alignment block
+        new_width = max(pixel_alignment, new_width)
+        new_height = max(pixel_alignment, new_height)
+        
+        # Resize image
+        # Permute to [N, C, H, W] for interpolation
+        image_permuted = image.permute(0, 3, 1, 2)
+        processed_image = comfy.utils.common_upscale(image_permuted, new_width, new_height, downscale_method, "disabled")
+        processed_image = processed_image.permute(0, 2, 3, 1)
+        
+        # Recalculate upscale factor to reach ORIGINAL target size from NEW downscaled size
+        # We use the max ratio to ensure coverage
+        factor_w = target_width / new_width
+        factor_h = target_height / new_height
+        new_factor = max(factor_w, factor_h)
+        
+        print(f"[MiraSubPack:UpscaleCalculator] Resized to {new_width}x{new_height}. New upscale factor: {new_factor:.4f} (Original target: {target_width}x{target_height})")
+        
+        return io.NodeOutput(processed_image, new_factor)
     
