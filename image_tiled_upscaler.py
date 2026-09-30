@@ -1,4 +1,5 @@
 import torch
+import logging
 import math
 import comfy.sample
 import comfy.samplers
@@ -6,6 +7,8 @@ import comfy.utils
 import latent_preview
 from comfy_api.latest import io
 import node_helpers
+
+logger = logging.getLogger(__name__)
 
 CAT = "Mira/SubPack/Image Tiled Upscaler"
 
@@ -439,18 +442,18 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
         del negative_tokens
 
         batch_latents = tiled_samples["samples"]
-        print(f"[MiraSubPack:AutoTiledTagger] Using {len(batch_latents)} tiles.")
-        print(f"[MiraSubPack:AutoTiledTagger] tagger_text (for copy to SAA)\n{tagger_text}")
+        logger.info(f"[MiraSubPack:AutoTiledTagger] Using {len(batch_latents)} tiles.")
+        logger.info(f"[MiraSubPack:AutoTiledTagger] tagger_text (for copy to SAA)\n{tagger_text}")
         
         if mode == "Normal" and ref_latents is not None:
-            print("    >Mode=Normal: ref_latents will be ignored.")
+            logger.warning("    >Mode=Normal: ref_latents will be ignored.")
         elif ref_latents is not None:
-            print("    >Using provided reference latents for this tile.")
+            logger.info("    >Using provided reference latents for this tile.")
 
         if mode == "Normal" and noise_boost > 0:
-            print(f"[MiraSubPack:AutoTiledTagger] Mode={mode}: noise_boost is ignored.")
+            logger.warning(f"[MiraSubPack:AutoTiledTagger] Mode={mode}: noise_boost is ignored.")
         elif noise_boost > 0:
-            print(f"[MiraSubPack:AutoTiledTagger] Noise boost: {noise_boost:.2f}, method: {noise_injection_method}")
+            logger.info(f"[MiraSubPack:AutoTiledTagger] Noise boost: {noise_boost:.2f}, method: {noise_injection_method}")
                             
         # Parse tagger text mapping
         mapping = tagger_text.splitlines()
@@ -463,7 +466,7 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
                 if idx < len(mapping):
                     tags_str = mapping[idx].replace('(', r'\(').replace(')', r'\)')
                     dynamic_prompt = f"{common_positive}, {tags_str}" if common_positive else tags_str
-                print(f"    Tags: {tags_str}")
+                logger.info(f"    Tags: {tags_str}")
             else:
                 dynamic_prompt = common_positive
 
@@ -477,7 +480,7 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
                 if len(all_ref_latent) == len(batch_latents):
                     ref_latent = all_ref_latent[idx].unsqueeze(0)
                 else:
-                    print(f"    >Warning: ref_latents count {len(all_ref_latent)} does not match batch_latents count {len(batch_latents)}. Using the first ref_latent for all tiles.")
+                    logger.warning(f"    >Warning: ref_latents count {len(all_ref_latent)} does not match batch_latents count {len(batch_latents)}. Using the first ref_latent for all tiles.")
                     ref_latent = all_ref_latent[0].unsqueeze(0)
                 
                 if mode == "Reference":
@@ -490,7 +493,7 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
                         ref_latent = cls._inject_noise(
                             ref_latent, noise_boost, noise_injection_method, seed + idx
                         )
-                        print(f"    Noise boost applied to ref_latent (boost={noise_boost:.2f}, method={noise_injection_method})")
+                        logger.info(f"    Noise boost applied to ref_latent (boost={noise_boost:.2f}, method={noise_injection_method})")
 
                     if clip_negative:
                         negative_tokens = clip_negative.tokenize(common_negative)
@@ -507,8 +510,8 @@ class ImageTiledKSamplerWithTagger(io.ComfyNode):
             
             single_latent = batch_latents[idx].unsqueeze(0)  # [C, H, W] -> [1, C, H, W]
                 
-            print(f"  > Sampling Tile {idx+1}/{len(batch_latents)}: {single_latent.shape[3]}x{single_latent.shape[2]}")
-            print(f"    Tile latent shape: {single_latent.shape}")
+            logger.info(f"  > Sampling Tile {idx+1}/{len(batch_latents)}: {single_latent.shape[3]}x{single_latent.shape[2]}")
+            logger.info(f"    Tile latent shape: {single_latent.shape}")
             sampled_tile = cls._sample_single(
                 model, positive_conditioning, negative_conditioning, {"samples": single_latent},
                 seed, steps, cfg, sampler_name, scheduler, denoise
@@ -651,7 +654,7 @@ class OverlappedLatentMerge(io.ComfyNode):
     def execute(cls, tiled_latents, mira_itu_pipeline, feather_rate_override) -> io.NodeOutput:
         (full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate, pixel_alignment) = mira_itu_pipeline
         if round(feather_rate_override,2) != 0:
-            print(f"[MiraSubPack:OverlappedImageMerge] Override feather_rate to {feather_rate_override} ")
+            logger.info(f"[MiraSubPack:OverlappedImageMerge] Override feather_rate to {feather_rate_override} ")
             overlap_feather_rate = feather_rate_override
             
         device = tiled_latents["samples"].device
@@ -684,7 +687,7 @@ class OverlappedLatentMerge(io.ComfyNode):
         # col_x -> max_y_end
         col_last_y_end = {}
 
-        print(f"[MiraSubPack:OverlappedLatentMerge] Merging {len(tiles)} tiles for canvas {full_width}x{full_height}...")
+        logger.info(f"[MiraSubPack:OverlappedLatentMerge] Merging {len(tiles)} tiles for canvas {full_width}x{full_height}...")
         for idx, (x, y, w, h) in enumerate(tiles):
             # Extract current tile
             tile_latent = batch_latents[idx] # [C, H, W]
@@ -715,7 +718,7 @@ class OverlappedLatentMerge(io.ComfyNode):
                 # If overlap is > 50% of the tile width
                 if overlap_amount > (lw_tile * 0.5):
                     boost_weight = 10.0
-                    print(f"  > Tile {idx}: Horizontal overlap > 50% ({overlap_amount}/{lw_tile}), boosting weight.")
+                    logger.info(f"  > Tile {idx}: Horizontal overlap > 50% ({overlap_amount}/{lw_tile}), boosting weight.")
             
             # Check Vertical Overlap (less common in row-by-row but good for robustness)
             if x in col_last_y_end:
@@ -723,7 +726,7 @@ class OverlappedLatentMerge(io.ComfyNode):
                 overlap_amount = prev_end - ly
                 if overlap_amount > (lh_tile * 0.5):
                     boost_weight = max(boost_weight, 10.0)
-                    print(f"  > Tile {idx}: Vertical overlap > 50% ({overlap_amount}/{lh_tile}), boosting weight.")
+                    logger.info(f"  > Tile {idx}: Vertical overlap > 50% ({overlap_amount}/{lh_tile}), boosting weight.")
 
             if boost_weight > 1.0:
                 mask = mask * boost_weight
@@ -777,9 +780,9 @@ class OverlappedImageMerge(io.ComfyNode):
         (full_width, full_height, tile_width, tile_height, overlap, overlap_feather_rate, pixel_alignment) = mira_itu_pipeline
         direct_overwrite = round(feather_rate_override, 2) == -0.1
         if direct_overwrite:
-            print("[MiraSubPack:OverlappedImageMerge] Feathering disabled (-0.1), using direct overwrite.")
+            logger.info("[MiraSubPack:OverlappedImageMerge] Feathering disabled (-0.1), using direct overwrite.")
         elif round(feather_rate_override,2) != 0:
-            print(f"[MiraSubPack:OverlappedImageMerge] Override feather_rate to {feather_rate_override} ")
+            logger.info(f"[MiraSubPack:OverlappedImageMerge] Override feather_rate to {feather_rate_override} ")
             overlap_feather_rate = feather_rate_override
         
         device = tiled_images.device
@@ -801,7 +804,7 @@ class OverlappedImageMerge(io.ComfyNode):
         row_last_x_end = {}
         col_last_y_end = {}
 
-        print(f"[MiraSubPack:OverlappedImageMerge] Merging {len(tiles)} tiles...")
+        logger.info(f"[MiraSubPack:OverlappedImageMerge] Merging {len(tiles)} tiles...")
 
         for idx, (x, y, w, h) in enumerate(tiles):
             if idx >= N: break
@@ -915,11 +918,11 @@ class TiledImageColorCorrection(io.ComfyNode):
 
         # Early return if no correction needed
         if color_correction_strength == 0 and luminance_correction_strength == 0:
-            print("[MiraSubPack:TiledImageColorCorrection] All correction strengths are 0, skipping.")
+            logger.info("[MiraSubPack:TiledImageColorCorrection] All correction strengths are 0, skipping.")
             return io.NodeOutput(tiled_images)
 
         if N_ref != N:
-            print(f"[MiraSubPack:TiledImageColorCorrection] ⚠ Warning: reference_tiles count ({N_ref}) != tiled_images count ({N}). Will process min({N_ref}, {N}) tiles.")
+            logger.warning(f"[MiraSubPack:TiledImageColorCorrection] ⚠ Warning: reference_tiles count ({N_ref}) != tiled_images count ({N}). Will process min({N_ref}, {N}) tiles.")
 
         active_methods = []
         if color_correction_method != "none" and color_correction_strength > 0:
@@ -927,7 +930,7 @@ class TiledImageColorCorrection(io.ComfyNode):
         if luminance_correction_strength > 0:
             active_methods.append(f"luminance(s={luminance_correction_strength:.2f})")
         method_str = " + ".join(active_methods) if active_methods else "none"
-        print(f"[MiraSubPack:TiledImageColorCorrection] Correcting {N} tiles | method: {method_str}")
+        logger.info(f"[MiraSubPack:TiledImageColorCorrection] Correcting {N} tiles | method: {method_str}")
 
         correction_stats = {
             "mean_delta": 0.0,
@@ -994,7 +997,7 @@ class TiledImageColorCorrection(io.ComfyNode):
         # Print summary statistics
         if process_count > 0:
             correction_stats["mean_delta"] /= process_count
-        print(f"  Mean delta: {correction_stats['mean_delta']:.6f}, Max delta: {correction_stats['max_delta']:.6f}")
+        logger.info(f"  Mean delta: {correction_stats['mean_delta']:.6f}, Max delta: {correction_stats['max_delta']:.6f}")
 
         return io.NodeOutput(output)
     
@@ -1381,9 +1384,9 @@ class ImageCropTiles(io.ComfyNode):
 
         # Input validation
         if tile_size <= overlap:
-            print(f"[MiraSubPack:ImageCropTiles] ⚠ Warning: tile_size ({tile_size}) must be larger than overlap ({overlap})")
+            logger.warning(f"[MiraSubPack:ImageCropTiles] ⚠ Warning: tile_size ({tile_size}) must be larger than overlap ({overlap})")
             tile_size = overlap + pixel_alignment
-            print(f"  Auto-adjusted tile_size to {tile_size}")
+            logger.info(f"  Auto-adjusted tile_size to {tile_size}")
         
         if W < pixel_alignment or H < pixel_alignment:
             raise ValueError(f"Image dimensions ({W}x{H}) are too small for pixel_alignment ({pixel_alignment})")
@@ -1394,20 +1397,20 @@ class ImageCropTiles(io.ComfyNode):
         H, W = source.shape[0], source.shape[1]
         
         if crop_info["cropped"]:
-            print("[MiraSubPack:ImageCropTiles] ⚠ Image center cropped for pixel alignment:")
-            print(f"  Original: {crop_info['original_width']}x{crop_info['original_height']}")
-            print(f"  Cropped: {W}x{H}")
-            print(f"  Crop amount: W={crop_info['crop_amount_w']}px, H={crop_info['crop_amount_h']}px")
-            print(f"  Crop position: top={crop_info['crop_top']}, left={crop_info['crop_left']}")
+            logger.warning("[MiraSubPack:ImageCropTiles] ⚠ Image center cropped for pixel alignment:")
+            logger.info(f"  Original: {crop_info['original_width']}x{crop_info['original_height']}")
+            logger.info(f"  Cropped: {W}x{H}")
+            logger.info(f"  Crop amount: W={crop_info['crop_amount_w']}px, H={crop_info['crop_amount_h']}px")
+            logger.info(f"  Crop position: top={crop_info['crop_top']}, left={crop_info['crop_left']}")
 
-        print(f"[MiraSubPack:ImageCropTiles] Processing image: {W}x{H}")
-        print(f"  Tile size: {tile_size}, Overlap: {overlap}, Pixel alignment: {pixel_alignment}")
+        logger.info(f"[MiraSubPack:ImageCropTiles] Processing image: {W}x{H}")
+        logger.info(f"  Tile size: {tile_size}, Overlap: {overlap}, Pixel alignment: {pixel_alignment}")
 
         effective_tile_width, effective_tile_height = tile_size, tile_size
         if adaptable_tile_size:
             value = int(round(tile_size * adaptable_max_deviation_ratio))
             adaptable_max_deviation = (value // pixel_alignment) * pixel_alignment
-            print(f"[MiraSubPack:ImageCropTiles] adaptable_max_deviation set to {adaptable_max_deviation} pixels.")
+            logger.info(f"[MiraSubPack:ImageCropTiles] adaptable_max_deviation set to {adaptable_max_deviation} pixels.")
             effective_tile_width, effective_tile_height = TileHelper._find_optimal_tile_size(W, H, tile_size, overlap, adaptable_max_deviation, adaptable_max_aspect_ratio, pixel_alignment)
 
         tiles = TileHelper._calculate_tiles(W, H, effective_tile_width, effective_tile_height, overlap, pixel_alignment)
@@ -1478,11 +1481,11 @@ class ImageCropTilesByPixels(io.ComfyNode):
         H, W = source.shape[0], source.shape[1]
         
         if crop_info["cropped"]:
-            print("[MiraSubPack:ImageCropTilesByPixels] ⚠ Image center cropped for pixel alignment:")
-            print(f"  Original: {crop_info['original_width']}x{crop_info['original_height']}")
-            print(f"  Cropped: {W}x{H}")
-            print(f"  Crop amount: W={crop_info['crop_amount_w']}px, H={crop_info['crop_amount_h']}px")
-            print(f"  Crop position: top={crop_info['crop_top']}, left={crop_info['crop_left']}")
+            logger.warning("[MiraSubPack:ImageCropTilesByPixels] ⚠ Image center cropped for pixel alignment:")
+            logger.info(f"  Original: {crop_info['original_width']}x{crop_info['original_height']}")
+            logger.info(f"  Cropped: {W}x{H}")
+            logger.info(f"  Crop amount: W={crop_info['crop_amount_w']}px, H={crop_info['crop_amount_h']}px")
+            logger.info(f"  Crop position: top={crop_info['crop_top']}, left={crop_info['crop_left']}")
 
         # Convert megapixels to pixels (1.0M = 1048576 pixels)
         max_pixels_value = int(max_pixels_per_tile * 1048576)
@@ -1496,21 +1499,21 @@ class ImageCropTilesByPixels(io.ComfyNode):
         
         # Ensure tile_size is larger than overlap
         if base_tile_size <= overlap:
-            print(f"[MiraSubPack:ImageCropTilesByPixels] ⚠ Warning: calculated tile_size ({base_tile_size}) must be larger than overlap ({overlap})")
+            logger.warning(f"[MiraSubPack:ImageCropTilesByPixels] ⚠ Warning: calculated tile_size ({base_tile_size}) must be larger than overlap ({overlap})")
             base_tile_size = overlap + pixel_alignment
-            print(f"  Auto-adjusted tile_size to {base_tile_size}")
+            logger.info(f"  Auto-adjusted tile_size to {base_tile_size}")
         
         actual_pixels = base_tile_size * base_tile_size
-        print(f"[MiraSubPack:ImageCropTilesByPixels] Calculated base tile size: {base_tile_size}x{base_tile_size}")
-        print(f"  Max pixels per tile: {max_pixels_per_tile}M ({max_pixels_value} pixels)")
-        print(f"  Actual pixels per tile: {actual_pixels}")
-        print(f"  Image size: {W}x{H}")
+        logger.info(f"[MiraSubPack:ImageCropTilesByPixels] Calculated base tile size: {base_tile_size}x{base_tile_size}")
+        logger.info(f"  Max pixels per tile: {max_pixels_per_tile}M ({max_pixels_value} pixels)")
+        logger.info(f"  Actual pixels per tile: {actual_pixels}")
+        logger.info(f"  Image size: {W}x{H}")
 
         effective_tile_width, effective_tile_height = base_tile_size, base_tile_size
         if adaptable_tile_size:
             value = int(round(base_tile_size * adaptable_max_deviation_ratio))
             adaptable_max_deviation = (value // pixel_alignment) * pixel_alignment
-            print(f"[MiraSubPack:ImageCropTilesByPixels] adaptable_max_deviation set to {adaptable_max_deviation} pixels.")
+            logger.info(f"[MiraSubPack:ImageCropTilesByPixels] adaptable_max_deviation set to {adaptable_max_deviation} pixels.")
             effective_tile_width, effective_tile_height = TileHelper._find_optimal_tile_size(W, H, base_tile_size, overlap, adaptable_max_deviation, adaptable_max_aspect_ratio, pixel_alignment)
 
         tiles = TileHelper._calculate_tiles(W, H, effective_tile_width, effective_tile_height, overlap, pixel_alignment)
@@ -1523,7 +1526,7 @@ class ImageCropTilesByPixels(io.ComfyNode):
         cropped_tiles = torch.stack(tile_list, dim=0)
         pipeline = (W, H, effective_tile_width, effective_tile_height, overlap, overlap_feather_rate, pixel_alignment)
         upscaled_pipeline_info = f"Full: {W}x{H}\nTile: {len(tiles)} -> {effective_tile_width}x{effective_tile_height}\nOverlap: {overlap}\nFeatherRate: {overlap_feather_rate}\nMaxPixelsPerTile: {max_pixels_per_tile}M\nAdaptable: {adaptable_tile_size}\nMaxDeviationRatio: {adaptable_max_deviation_ratio}\nMaxAspectRatio: {adaptable_max_aspect_ratio}\nPixelAlignment: {pixel_alignment}"
-        print(upscaled_pipeline_info)
+        logger.info(upscaled_pipeline_info)
         # Output the cropped full image for color correction reference
         cropped_full_image = source.unsqueeze(0)  # [H, W, C] -> [1, H, W, C]
         return io.NodeOutput(cropped_tiles, pipeline, upscaled_pipeline_info, cropped_full_image)    
@@ -1628,11 +1631,11 @@ class LatentUpscaleAndCropTiles(io.ComfyNode):
         # Warn if scale factor was adjusted significantly
         scale_diff = abs(actual_scale_factor - scale_factor)
         if scale_diff > 0.01:  # More than 1% difference
-            print("[MiraSubPack:LatentUpscaleAndCropTiles] ⚠ Scale factor adjusted for pixel alignment:")
-            print(f"  Requested: {scale_factor:.4f}x")
-            print(f"  Actual: {actual_scale_factor:.4f}x (W: {actual_scale_w:.4f}x, H: {actual_scale_h:.4f}x)")
-            print(f"  Original: {orig_width_px}x{orig_height_px} → Target: {target_width_px}x{target_height_px}")
-            print(f"  Pixel alignment: {pixel_alignment}")
+            logger.warning("[MiraSubPack:LatentUpscaleAndCropTiles] ⚠ Scale factor adjusted for pixel alignment:")
+            logger.info(f"  Requested: {scale_factor:.4f}x")
+            logger.info(f"  Actual: {actual_scale_factor:.4f}x (W: {actual_scale_w:.4f}x, H: {actual_scale_h:.4f}x)")
+            logger.info(f"  Original: {orig_width_px}x{orig_height_px} → Target: {target_width_px}x{target_height_px}")
+            logger.info(f"  Pixel alignment: {pixel_alignment}")
         
         target_latent_w = target_width_px // pixel_alignment
         target_latent_h = target_height_px // pixel_alignment
@@ -1693,8 +1696,8 @@ class LatentUpscaleAndCropTiles(io.ComfyNode):
         # --- Crop original-size latent with same tiling scheme ---
         # Directly calculate original tile coordinates by dividing upscaled coordinates by actual scale factor
         # This ensures the same number of tiles and matching positions
-        print("[MiraSubPack:LatentUpscaleAndCropTiles] Cropping original latent with same tile scheme for reference...")
-        print(f"  Original latent size: {latent_w}x{latent_h} (pixels: {orig_width_px}x{orig_height_px})")
+        logger.info("[MiraSubPack:LatentUpscaleAndCropTiles] Cropping original latent with same tile scheme for reference...")
+        logger.info(f"  Original latent size: {latent_w}x{latent_h} (pixels: {orig_width_px}x{orig_height_px})")
         
         original_tile_coords = []
         for x, y, w, h in tile_coords:
@@ -1716,9 +1719,9 @@ class LatentUpscaleAndCropTiles(io.ComfyNode):
             orig_h = max(pixel_alignment, min(orig_h, orig_height_px - orig_y))
             original_tile_coords.append((orig_x, orig_y, orig_w, orig_h))
         
-        print(f"  Original tile count: {len(original_tile_coords)} (same as upscaled: {len(tile_coords)})")
-        print(f"  Original tile size range: {min(w for _,_,w,_ in original_tile_coords)}~{max(w for _,_,w,_ in original_tile_coords)} x {min(h for _,_,_,h in original_tile_coords)}~{max(h for _,_,_,h in original_tile_coords)}")
-        print(f"  Original tile coordinates (x, y, w, h): {original_tile_coords[:5]}...")  # Print first 5 for brevity
+        logger.info(f"  Original tile count: {len(original_tile_coords)} (same as upscaled: {len(tile_coords)})")
+        logger.info(f"  Original tile size range: {min(w for _,_,w,_ in original_tile_coords)}~{max(w for _,_,w,_ in original_tile_coords)} x {min(h for _,_,_,h in original_tile_coords)}~{max(h for _,_,_,h in original_tile_coords)}")
+        logger.info(f"  Original tile coordinates (x, y, w, h): {original_tile_coords[:5]}...")  # Print first 5 for brevity
         
         original_all_tiles = []
         orignial_samples = samples.clone()
@@ -1783,7 +1786,7 @@ class MiraImageUpscaleCalculator(io.ComfyNode):
         aligned_height = (H // pixel_alignment) * pixel_alignment
         
         if aligned_width != W or aligned_height != H:
-            print(f"[MiraSubPack:UpscaleCalculator] aligning input image to {pixel_alignment}px grid...")
+            logger.info(f"[MiraSubPack:UpscaleCalculator] aligning input image to {pixel_alignment}px grid...")
             crop_h = H - aligned_height
             crop_w = W - aligned_width
             
@@ -1795,7 +1798,7 @@ class MiraImageUpscaleCalculator(io.ComfyNode):
             image = image[:, top:top+aligned_height, left:left+aligned_width, :]
             
             # Update Dimensions
-            print(f"  Cropped Input: {aligned_width}x{aligned_height} (Original: {W}x{H})")
+            logger.info(f"  Cropped Input: {aligned_width}x{aligned_height} (Original: {W}x{H})")
             H, W = aligned_height, aligned_width
 
         current_pixels = W * H
@@ -1809,10 +1812,10 @@ class MiraImageUpscaleCalculator(io.ComfyNode):
         target_height = (target_height // pixel_alignment) * pixel_alignment
         
         if current_pixels <= limit_pixels:
-            print(f"[MiraSubPack:UpscaleCalculator] Image size {W}x{H} ({current_pixels/1e6:.2f}MP) is within limit {limit_megapixels}MP.")
+            logger.info(f"[MiraSubPack:UpscaleCalculator] Image size {W}x{H} ({current_pixels/1e6:.2f}MP) is within limit {limit_megapixels}MP.")
             return io.NodeOutput(image, target_upscale_factor)
             
-        print(f"[MiraSubPack:UpscaleCalculator] Image size {W}x{H} ({current_pixels/1e6:.2f}MP) exceeds limit {limit_megapixels}MP. Downscaling...")
+        logger.info(f"[MiraSubPack:UpscaleCalculator] Image size {W}x{H} ({current_pixels/1e6:.2f}MP) exceeds limit {limit_megapixels}MP. Downscaling...")
         
         scale = math.sqrt(limit_pixels / current_pixels)
         new_width = int(W * scale)
@@ -1838,7 +1841,7 @@ class MiraImageUpscaleCalculator(io.ComfyNode):
         factor_h = target_height / new_height
         new_factor = max(factor_w, factor_h)
         
-        print(f"[MiraSubPack:UpscaleCalculator] Resized to {new_width}x{new_height}. New upscale factor: {new_factor:.4f} (Original target: {target_width}x{target_height})")
+        logger.info(f"[MiraSubPack:UpscaleCalculator] Resized to {new_width}x{new_height}. New upscale factor: {new_factor:.4f} (Original target: {target_width}x{target_height})")
         
         return io.NodeOutput(processed_image, new_factor)
     

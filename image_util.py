@@ -1,7 +1,10 @@
+import logging
 import torch
 import numpy as np
 import cv2
 from comfy_api.latest import io
+
+logger = logging.getLogger(__name__)
 
 CAT = "Mira/SubPack"
 
@@ -78,9 +81,7 @@ class ImageMergeByPixelAlign(io.ComfyNode):
                     sift_features, match_ratio
                 )
             except Exception as e:
-                print(f"[ImageMergeByPixelAlign] Error on image {i}: {e}")
-                import traceback
-                traceback.print_exc()
+                logger.exception(f"[ImageMergeByPixelAlign] Error on image {i}: {e}")
                 result_cv = img_base_cv
 
             result_tensor = cls.cv2_to_tensor(result_cv)
@@ -115,7 +116,7 @@ class ImageMergeByPixelAlign(io.ComfyNode):
         kp2, des2 = detector.detectAndCompute(gray_base, None)
 
         if des1 is None or des2 is None:
-            print("[MiraSubPack:ImageMerge] No descriptors found.")
+            logger.warning("[MiraSubPack:ImageMerge] No descriptors found.")
             return base_img
 
         bf = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
@@ -128,10 +129,10 @@ class ImageMergeByPixelAlign(io.ComfyNode):
                 if m.distance < match_ratio * n.distance:
                     good_matches.append(m)
 
-        print(f"[MiraSubPack:ImageMerge] Found {len(good_matches)} good matches")
+        logger.info(f"[MiraSubPack:ImageMerge] Found {len(good_matches)} good matches")
 
         if len(good_matches) < 4:
-            print(f"[MiraSubPack:ImageMerge] Not enough matches: {len(good_matches)}/4")
+            logger.warning(f"[MiraSubPack:ImageMerge] Not enough matches: {len(good_matches)}/4")
             return base_img
 
         src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
@@ -139,12 +140,12 @@ class ImageMergeByPixelAlign(io.ComfyNode):
 
         M, mask_homography = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
         if M is None:
-            print("[MiraSubPack:ImageMerge] Homography calculation failed")
+            logger.warning("[MiraSubPack:ImageMerge] Homography calculation failed")
             return base_img
 
         if mask_homography is not None:
             inliers = np.sum(mask_homography)
-            print(f"[MiraSubPack:ImageMerge] Inliers: {inliers}/{len(good_matches)}")
+            logger.info(f"[MiraSubPack:ImageMerge] Inliers: {inliers}/{len(good_matches)}")
 
         h, w, _ = base_img.shape
         warped_patch = cv2.warpPerspective(patch_img, M, (w, h), 
@@ -158,8 +159,8 @@ class ImageMergeByPixelAlign(io.ComfyNode):
         
         original_mask = (color_distance > bg_tolerance).astype(np.uint8) * 255
         
-        print(f"[MiraSubPack:ImageMerge] Background color: BGR{bg_color}, tolerance: {bg_tolerance}")
-        print(f"[MiraSubPack:ImageMerge] Detected foreground pixels: {np.sum(original_mask > 0)}")
+        logger.info(f"[MiraSubPack:ImageMerge] Background color: BGR{bg_color}, tolerance: {bg_tolerance}")
+        logger.info(f"[MiraSubPack:ImageMerge] Detected foreground pixels: {np.sum(original_mask > 0)}")
         
         warped_mask = cv2.warpPerspective(original_mask, M, (w, h),
                                           flags=cv2.INTER_LINEAR,
@@ -173,12 +174,12 @@ class ImageMergeByPixelAlign(io.ComfyNode):
         
         moments = cv2.moments(warped_mask)
         if moments['m00'] == 0:
-            print("[MiraSubPack:ImageMerge] Cannot find patch center")
+            logger.warning("[MiraSubPack:ImageMerge] Cannot find patch center")
             return base_img
             
         patch_cx = int(moments['m10'] / moments['m00'])
         patch_cy = int(moments['m01'] / moments['m00'])
-        print(f"[MiraSubPack:ImageMerge] Patch center: ({patch_cx}, {patch_cy})")
+        logger.info(f"[MiraSubPack:ImageMerge] Patch center: ({patch_cx}, {patch_cy})")
         
         patch_points = np.column_stack(np.where(warped_mask > 0))
         if len(patch_points) == 0:
@@ -187,7 +188,7 @@ class ImageMergeByPixelAlign(io.ComfyNode):
         distances = np.sqrt((patch_points[:, 1] - patch_cx)**2 + 
                           (patch_points[:, 0] - patch_cy)**2)
         max_radius = np.max(distances)
-        print(f"[MiraSubPack:ImageMerge] Patch max radius: {max_radius:.1f} pixels")
+        logger.info(f"[MiraSubPack:ImageMerge] Patch max radius: {max_radius:.1f} pixels")
         
         y_coords, x_coords = np.ogrid[:h, :w]
         dist_from_center = np.sqrt((x_coords - patch_cx)**2 + (y_coords - patch_cy)**2)
@@ -227,14 +228,14 @@ class ImageMergeByPixelAlign(io.ComfyNode):
         
         patch_alpha_3ch = np.stack([patch_alpha] * 3, axis=2)
         
-        print(f"[MiraSubPack:ImageMerge] Core radius: {core_radius:.1f} pixels")
+        logger.info(f"[MiraSubPack:ImageMerge] Core radius: {core_radius:.1f} pixels")
         if blend_mode == "full_gradient":
-            print(f"[MiraSubPack:ImageMerge] Blend mode: {blend_mode} (core to edge), strength: {blend_strength}")
+            logger.info(f"[MiraSubPack:ImageMerge] Blend mode: {blend_mode} (core to edge), strength: {blend_strength}")
         else:
-            print(f"[MiraSubPack:ImageMerge] Blend outer radius: {blend_outer_radius:.1f} pixels")
-            print(f"[MiraSubPack:ImageMerge] Blend mode: {blend_mode}, strength: {blend_strength}")
-        print(f"[MiraSubPack:ImageMerge] Core pixels (alpha=1.0): {np.sum(patch_alpha > 0.99)}")
-        print(f"[MiraSubPack:ImageMerge] Blend pixels (0<alpha<1): {np.sum((patch_alpha > 0.01) & (patch_alpha < 0.99))}")
+            logger.info(f"[MiraSubPack:ImageMerge] Blend outer radius: {blend_outer_radius:.1f} pixels")
+            logger.info(f"[MiraSubPack:ImageMerge] Blend mode: {blend_mode}, strength: {blend_strength}")
+        logger.info(f"[MiraSubPack:ImageMerge] Core pixels (alpha=1.0): {np.sum(patch_alpha > 0.99)}")
+        logger.info(f"[MiraSubPack:ImageMerge] Blend pixels (0<alpha<1): {np.sum((patch_alpha > 0.01) & (patch_alpha < 0.99))}")
         
         base_float = base_img.astype(np.float32)
         patch_float = warped_patch.astype(np.float32)
@@ -243,7 +244,7 @@ class ImageMergeByPixelAlign(io.ComfyNode):
         
         output = np.clip(result, 0, 255).astype(np.uint8)
         
-        print("[MiraSubPack:ImageMerge] Blend complete")
+        logger.info("[MiraSubPack:ImageMerge] Blend complete")
 
         return output
 

@@ -7,6 +7,7 @@ cmd to run local llama.cpp server with Qwen3VL GGUF model:
 llama-server.exe -m "Qwen3VL-7B-Instruct-Q5_K_M.gguf" -ngl 33 -c 4096 --port 58080 --image-min-tokens 2048
 '''
 
+import logging
 import requests
 import base64
 from io import BytesIO
@@ -15,6 +16,8 @@ import torch
 import numpy as np
 from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io
+
+logger = logging.getLogger(__name__)
 
 CAT = "Mira/SubPack/Qwen3VL"
 
@@ -198,7 +201,7 @@ class Qwen3VLNode(io.ComfyNode):
             image_np = image.cpu().numpy()
             batch_size = image_np.shape[0] if image_np.ndim == 4 else 1
             
-            print(f"[MiraSubPack:Qwen3VL] Processing {batch_size} image(s)")
+            logger.info(f"[MiraSubPack:Qwen3VL] Processing {batch_size} image(s)")
             
             all_captions = []
             
@@ -241,7 +244,7 @@ class Qwen3VLNode(io.ComfyNode):
                 }
                 
                 # Send request to external llama.cpp service
-                print(f"[MiraSubPack:Qwen3VL] Sending request for image {batch_idx + 1}/{batch_size} to {llama_url}")
+                logger.info(f"[MiraSubPack:Qwen3VL] Sending request for image {batch_idx + 1}/{batch_size} to {llama_url}")
                 response = requests.post(
                     llama_url,
                     json=request_body,
@@ -251,7 +254,7 @@ class Qwen3VLNode(io.ComfyNode):
                 
                 if response.status_code != 200:
                     error_msg = f"HTTP {response.status_code}: {response.text}"
-                    print(f"[MiraSubPack:Qwen3VL] Error on image {batch_idx + 1}: {error_msg}")
+                    logger.error(f"[MiraSubPack:Qwen3VL] Error on image {batch_idx + 1}: {error_msg}")
                     all_captions.append(f"Error: {error_msg}")
                     continue
                 
@@ -265,31 +268,31 @@ class Qwen3VLNode(io.ComfyNode):
                     # Clean up multiple spaces
                     caption = ' '.join(caption.split())
                     all_captions.append(caption)
-                    print(f"[MiraSubPack:Qwen3VL] Successfully generated caption for image {batch_idx + 1} ({len(caption)} chars)")
+                    logger.info(f"[MiraSubPack:Qwen3VL] Successfully generated caption for image {batch_idx + 1} ({len(caption)} chars)")
                 else:
                     error_msg = f"Unexpected response format: {result}"
-                    print(f"[MiraSubPack:Qwen3VL] Error on image {batch_idx + 1}: {error_msg}")
+                    logger.error(f"[MiraSubPack:Qwen3VL] Error on image {batch_idx + 1}: {error_msg}")
                     all_captions.append(f"Error: {error_msg}")
             
             # Join all captions with newlines (one caption per line)
             final_caption = '\n'.join(all_captions)
-            print(f"[MiraSubPack:Qwen3VL] Completed processing {len(all_captions)} image(s)")
+            logger.info(f"[MiraSubPack:Qwen3VL] Completed processing {len(all_captions)} image(s)")
             
             return io.NodeOutput(final_caption, prompt)
         
         except requests.Timeout:
             error_msg = f"Request timed out after {REQUEST_TIMEOUT} seconds"
-            print(f"[MiraSubPack:Qwen3VL] Error: {error_msg}")
+            logger.error(f"[MiraSubPack:Qwen3VL] Error: {error_msg}")
             return io.NodeOutput(f"Error: {error_msg}", "")
         
         except requests.RequestException as e:
             error_msg = f"Connection failed: {str(e)}"
-            print(f"[MiraSubPack:Qwen3VL] Error: {error_msg}")
+            logger.error(f"[MiraSubPack:Qwen3VL] Error: {error_msg}")
             return io.NodeOutput(f"Error: {error_msg}", "")
         
         except Exception as e:
             error_msg = f"Unexpected error: {str(e)}"
-            print(f"[MiraSubPack:Qwen3VL] Error: {error_msg}")
+            logger.error(f"[MiraSubPack:Qwen3VL] Error: {error_msg}")
             return io.NodeOutput(f"Error: {error_msg}", "")
 
 

@@ -10,6 +10,7 @@ llama-server.exe -m "llama-joycaption-beta-one-hf-llava.Q8_0.gguf" --mmproj "lla
 '''
 
 
+import logging
 import requests
 import base64
 from io import BytesIO
@@ -18,6 +19,8 @@ import torch
 import numpy as np
 from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io
+
+logger = logging.getLogger(__name__)
 
 CAT = "Mira/SubPack/JoyCaption"
 
@@ -269,7 +272,7 @@ class JoyCaptionNodeBetaOne(io.ComfyNode):
             }
             
             # Send request to external LLaMA service
-            print(f"[MiraSubPack:JoyCaption] Sending request to {llama_url}")
+            logger.info(f"[MiraSubPack:JoyCaption] Sending request to {llama_url}")
             response = requests.post(
                 llama_url,
                 json=request_body,
@@ -279,7 +282,7 @@ class JoyCaptionNodeBetaOne(io.ComfyNode):
             
             if response.status_code != 200:
                 error_msg = f"HTTP {response.status_code}: {response.text}"
-                print(f"[MiraSubPack:JoyCaption] Error: {error_msg}")
+                logger.error(f"[MiraSubPack:JoyCaption] Error: {error_msg}")
                 return io.NodeOutput(f"Error: {error_msg}")
             
             # Parse response
@@ -287,26 +290,26 @@ class JoyCaptionNodeBetaOne(io.ComfyNode):
             
             if 'choices' in result and len(result['choices']) > 0:
                 caption = result['choices'][0]['message']['content']
-                print(f"[MiraSubPack:JoyCaption] Successfully generated caption ({len(caption)} chars)")
+                logger.info(f"[MiraSubPack:JoyCaption] Successfully generated caption ({len(caption)} chars)")
                 return io.NodeOutput(caption, prompt, OPTION_CHOICES)
             else:
                 error_msg = f"Unexpected response format: {result}"
-                print(f"[MiraSubPack:JoyCaption] Error: {error_msg}")
+                logger.error(f"[MiraSubPack:JoyCaption] Error: {error_msg}")
                 return io.NodeOutput(f"Error: {error_msg}", "", OPTION_CHOICES)
         
         except requests.Timeout:
             error_msg = f"Request timed out after {REQUEST_TIMEOUT} seconds"
-            print(f"[MiraSubPack:JoyCaption] Error: {error_msg}")
+            logger.error(f"[MiraSubPack:JoyCaption] Error: {error_msg}")
             return io.NodeOutput(f"Error: {error_msg}", "", OPTION_CHOICES)
         
         except requests.RequestException as e:
             error_msg = f"Connection failed: {str(e)}"
-            print(f"[MiraSubPack:JoyCaption] Error: {error_msg}")
+            logger.error(f"[MiraSubPack:JoyCaption] Error: {error_msg}")
             return io.NodeOutput(f"Error: {error_msg}", "", OPTION_CHOICES)
         
         except Exception as e:
             error_msg = f"Unexpected error: {str(e)}"
-            print(f"[MiraSubPack:JoyCaption] Error: {error_msg}")
+            logger.error(f"[MiraSubPack:JoyCaption] Error: {error_msg}")
             return io.NodeOutput(f"Error: {error_msg}", "", OPTION_CHOICES)
 
 
@@ -401,7 +404,7 @@ class JoyCaptionBetaOneSimpleNode(io.ComfyNode):
             }
             
             # Send request
-            print(f"[JoyCaptionBetaOne] Sending request to {llama_url}")
+            logger.info(f"[JoyCaptionBetaOne] Sending request to {llama_url}")
             response = requests.post(
                 llama_url,
                 json=request_body,
@@ -413,18 +416,18 @@ class JoyCaptionBetaOneSimpleNode(io.ComfyNode):
                 return io.NodeOutput(f"Error: HTTP {response.status_code}")
             
             result = response.json()
-            print(f"[JoyCaptionBetaOne] Received response")
-            print(result)
+            logger.info(f"[JoyCaptionBetaOne] Received response")
+            logger.info(result)
             
             if 'choices' in result and len(result['choices']) > 0:
                 caption = result['choices'][0]['message']['content']
-                print(f"[JoyCaptionBetaOne] Generated caption ({len(caption)} chars)")
+                logger.info(f"[JoyCaptionBetaOne] Generated caption ({len(caption)} chars)")
                 return io.NodeOutput(caption)
             else:
                 return io.NodeOutput("Error: Unexpected response format")
         
         except Exception as e:
-            print(f"[JoyCaptionBetaOne] Error: {str(e)}")
+            logger.error(f"[JoyCaptionBetaOne] Error: {str(e)}")
             return io.NodeOutput(f"Error: {str(e)}")
 
 

@@ -1,10 +1,13 @@
 # https://huggingface.co/Phr00t/Qwen-Image-Edit-Rapid-AIO/blob/main/fixed-textencode-node/nodes_qwen.py
 
+import logging
 import node_helpers
 import comfy.utils
 import math
 from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io
+
+logger = logging.getLogger(__name__)
 
 CAT="Mira/SubPack/QwenImage"
 
@@ -109,8 +112,8 @@ class TextEncodeQwenImageEditPlusMod(io.ComfyNode):
                     else:
                         twidth = target_latent["samples"].shape[-1] * 8
                         theight = target_latent["samples"].shape[-2] * 8
-                    print("twidth, theight", twidth, theight)
-                    print("samples.shape[3], samples.shape[2]", samples.shape[3], samples.shape[2])
+                    logger.info("twidth, theight %s %s", twidth, theight)
+                    logger.info("samples.shape[3], samples.shape[2] %s %s", samples.shape[3], samples.shape[2])
                     if samples.shape[3] == twidth and samples.shape[2] == theight:
                         s = samples
                     else:

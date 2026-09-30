@@ -1,3 +1,4 @@
+import logging
 import base64
 from io import BytesIO
 from PIL import Image
@@ -6,6 +7,8 @@ try:
     from openai import OpenAI
 except ImportError:
     OpenAI = None
+
+logger = logging.getLogger(__name__)
 
 CAT = "Mira/SubPack/Image Tiled Upscaler"
 
@@ -93,7 +96,7 @@ To ensure natural coherence and comprehensiveness of the description, please sca
         N = tiled_images.shape[0]
         responses = []
 
-        print(f"[MiraSubPack:ImageTilesToLLM] Processing {N} tiles with model '{model}'")
+        logger.info(f"[MiraSubPack:ImageTilesToLLM] Processing {N} tiles with model '{model}'")
 
         for idx in range(N):
             tile = tiled_images[idx]  # [H, W, C]
@@ -142,11 +145,11 @@ To ensure natural coherence and comprehensiveness of the description, please sca
                 # Extract response text
                 text = completion.choices[0].message.content.strip()
                 responses.append(text)
-                print(f"[MiraSubPack:ImageTilesToLLM] Processed tile {idx+1}/{N}: {len(text)} chars")
+                logger.info(f"[MiraSubPack:ImageTilesToLLM] Processed tile {idx+1}/{N}: {len(text)} chars")
             except Exception as e:
                 error_msg = f"Error processing tile {idx+1}: {str(e)}"
                 responses.append(error_msg)
-                print(f"[MiraSubPack:ImageTilesToLLM] {error_msg}")
+                logger.error(f"[MiraSubPack:ImageTilesToLLM] {error_msg}")
 
         # Join responses with newlines
         trimmed_responses = [resp.replace('\n', '').strip() for resp in responses]
