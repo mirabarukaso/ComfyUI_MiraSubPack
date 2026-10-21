@@ -8,7 +8,7 @@ More test nodes for my [ComfyUI_Mira](https://github.com/mirabarukaso/ComfyUI_Mi
 
 ### SageFP16Switch benchmark: MOSS-Image SFT, bf16 vs int8 (Titan RTX, sm75)
 - GPU: Titan RTX (Turing sm75, no hardware bf16). Orig env: Python 3.13, torch 2.9.0+cu130, sageattention 2.2.0. Test venvs: torch 2.14.1+cu132, triton-windows 3.2, with sageattention 1.0.6 or 2.2.0 (otherwise identical `pip freeze`).
-- Workflow: MOSS-Image SFT + sft 4-step LoRA v2.0 + style LoRA, SkipLayerGuidance (single layer 22), Qwen3.5-9B int8 text encoder, flux2 VAE, 1536x2304, 6 steps, euler/simple, cfg 2.0.
+- Workflow: MOSS-Image SFT + sft 4-step LoRA v2.0 + style LoRA, SkipLayerGuidance (single layer 22), Qwen3.5-9B int8 text encoder, flux2 VAE, 1024x1536, 6 steps, euler/simple, cfg 2.0.
 - Seeds: 777 warm-up (discarded), timed on 2056035064 and 2056035065. s/image = mean server execution time of the 2 timed runs (model load excluded).
 - LPIPS (AlexNet), mean of both seeds, vs **bf16 / default attention / orig env**. Sage rows use `SageFP16Switch_MiraSubPack` (compute_fp16 + sage_cast).
 
