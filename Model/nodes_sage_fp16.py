@@ -68,16 +68,22 @@ class SageFP16Switch_Mira(io.ComfyNode):
         m = model.clone()
         base = m.model
         weight_dtype = base.get_dtype()
-        manual_cast = getattr(base, "manual_cast_dtype", None)
+        # Do NOT read base.manual_cast_dtype directly: the BaseModel object is shared by every ModelPatcher clone,
+        # and set_model_compute_dtype() is an object patch that is applied to it while *another* patcher is loaded
+        # (e.g. a ModelComputeDtype branch that ran earlier). Resolve this patcher's own value instead.
+        if "manual_cast_dtype" in m.object_patches:
+            manual_cast = m.object_patches["manual_cast_dtype"]
+        else:
+            manual_cast = m.object_patches_backup.get("manual_cast_dtype", getattr(base, "manual_cast_dtype", None)) \
+                if hasattr(m, "object_patches_backup") else getattr(base, "manual_cast_dtype", None)
         effective = manual_cast if manual_cast is not None else weight_dtype
         done = []
 
         if compute_fp16:
-            if effective == torch.float16:
-                done.append("compute already fp16 (skip)")
-            else:
-                m.set_model_compute_dtype(torch.float16)
-                done.append(f"compute {_dtype_name(effective)} -> float16")
+            # set_model_compute_dtype is idempotent and cheap; always apply it so the result never depends on
+            # which patcher happened to be loaded when this node executed.
+            m.set_model_compute_dtype(torch.float16)
+            done.append(f"compute {_dtype_name(effective)} -> float16")
 
         if sage_cast:
             # copy transformer_options so the source patcher is not mutated

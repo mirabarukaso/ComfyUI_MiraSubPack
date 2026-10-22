@@ -43,3 +43,27 @@ Notes:
 
 <img src="examples/SageFP16Switch_MOSS_sft_benchmark.jpg" width="1000">
 
+### SageFP16Switch benchmark: Qwen-Image 2.1, Q8_0 GGUF (Titan RTX, sm75)
+- GPU: Titan RTX (sm75). Env: Python 3.12, torch 2.14.1+cu132, triton-windows 3.2, sageattention 2.2.0 (Triton path).
+- Workflow: `qwen-image-2.1-UC-Q8_0.gguf` -> [dtype node] -> QwenImage21Cache -> KSampler (euler/simple, 25 steps, cfg 1.0), 1024x1024, Qwen3-VL 8B int8 text encoder.
+- Seeds: 1 warm-up (discarded), timed on 3 seeds. s/image = mean server execution time (model load excluded). LPIPS (AlexNet) vs the native run of the same seed.
+- `--fast fp16_accumulation fp8_matrix_mult cublas_ops` (cuDNN autotune off). Fresh server per row.
+
+| Node | Attention | Compute dtype | s/image | Speedup | LPIPS |
+|---|---|---|---|---|---|
+| none (native) | default (SDPA) | fp32 (bf16 weights, manual cast) | 143.4 | 1.00x | baseline |
+| ModelComputeDtype fp16 | sage 2.2 | fp16 | 24.2 | 5.94x | 0.0568 |
+| ModelComputeDtype fp16 | `--use-pytorch-cross-attention` | fp16 | 30.1 | 4.77x | 0.0378 |
+| `SageFP16Switch` (fp16 + sage_cast) | sage 2.2 | fp16 | 26.2 | 5.48x | 0.0568 |
+| `SageFP16Switch` (fp16 only) | `--use-pytorch-cross-attention` | fp16 | 30.2 | 4.76x | 0.0378 |
+
+Notes:
+- Without a dtype node, Qwen-Image 2.1 runs in fp32 on Turing (~143 s/image).
+- No NaN or black images in fp16 with this workflow.
+- ComfyUI's `ModelComputeDtype` (fp16) and `SageFP16Switch` give pixel-identical images at the same speed. Interleaved on one server (sage, 2 seeds per round), mean s/image: ModelComputeDtype 27.0 / 27.0 / 27.0, + SageFP16Switch 27.0 / 27.0 / 26.4. The 24.2 vs 26.2 gap in the table is between-session variance (separate servers vary by about +-10%), not node overhead.
+- The switch's extra value is the q/k/v cast for models whose attention inputs are not fp16; for Qwen-Image 2.1 the core node is enough.
+- sage 2.2 vs PyTorch attention (both fp16): roughly 20% faster (approximate, measured in separate sessions), LPIPS 0.057 vs 0.038 against the fp32 native output.
+- Fixed: `SageFP16Switch` could skip the fp16 switch (and run in fp32) when another dtype patch such as `ModelComputeDtype` had been loaded earlier on the same server, because it read the shared model's `manual_cast_dtype`. It now always applies fp16 when `compute_fp16` is on.
+
+<img src="examples/SageFP16Switch_QwenImage21_benchmark.jpg" width="1000">
+
