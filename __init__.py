@@ -1,29 +1,14 @@
-from .JoyCaption.beta_one import JoyCaptionNodeBetaOne, JoyCaptionBetaOneSimpleNode
-from .QwenImage.nodes_qwen import TextEncodeQwenImageEditMod, TextEncodeQwenImageEditPlusMod
-from .QwenImage.nodes_qwen3vl import Qwen3VLNode
 from .image_util import ImageMergeByPixelAlign
 from .image_tiled_upscaler import MiraITUPipelineExtract, MiraITUPipelineCombine, ImageTiledKSamplerWithTagger, OverlappedImageMerge, OverlappedLatentMerge, \
     TiledImageColorCorrection, ImageCropTiles, ImageCropTilesByPixels, LatentUpscaleAndCropTiles, MiraImageUpscaleCalculator
 from .image_tiles_llm import ImageTilesToLLM
 from .utils import VAEEncode_Mira, VAEDecode_Mira
 from .Model.nodes_sage_fp16 import SageFP16Switch_Mira, UNETLoaderFP16Storage_Mira
-from .image_tiles_llm import ImageTilesToLLM
 
 
-def __init__(self):
-    pass
-    
 NODE_CLASS_MAPPINGS = {
-    "JoyCaptionNodeBetaOne_MiraSubPack": JoyCaptionNodeBetaOne,
-    "JoyCaptionBetaOneSimple_MiraSubPack": JoyCaptionBetaOneSimpleNode,
-    
-    "TextEncodeQwenImageEdit_MiraSubPack": TextEncodeQwenImageEditMod,
-    "TextEncodeQwenImageEditPlus_MiraSubPack": TextEncodeQwenImageEditPlusMod,
-
-    "Qwen3VL_MiraSubPack": Qwen3VLNode,
-    
     "ImageMergeByPixelAlign_MiraSubPack": ImageMergeByPixelAlign,
-    
+
     "MiraITUPipelineExtract_MiraSubPack": MiraITUPipelineExtract,
     "MiraITUPipelineCombine_MiraSubPack": MiraITUPipelineCombine,
     "ImageTiledKSamplerWithTagger_MiraSubPack": ImageTiledKSamplerWithTagger,
@@ -35,27 +20,17 @@ NODE_CLASS_MAPPINGS = {
     "LatentUpscaleAndCropTiles_MiraSubPack": LatentUpscaleAndCropTiles,
     "MiraImageUpscaleCalculator_MiraSubPack": MiraImageUpscaleCalculator,
     "ImageTilesToLLM_MiraSubPack": ImageTilesToLLM,
-    
+
     "VAEEncode_MiraSubPack": VAEEncode_Mira,
     "VAEDecode_MiraSubPack": VAEDecode_Mira,
-    
+
     "SageFP16Switch_MiraSubPack": SageFP16Switch_Mira,
     "UNETLoaderFP16Storage_MiraSubPack": UNETLoaderFP16Storage_Mira,
-    
-    "ImageTilesToLLM_MiraSubPack": ImageTilesToLLM,
-}    
+}
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "JoyCaptionNodeBetaOne_MiraSubPack": "JoyCaption Beta One (External llama.cpp)",
-    "JoyCaptionBetaOneSimple_MiraSubPack": "JoyCaption Beta One Simple (External llama.cpp)",
-    
-    "Qwen3VL_MiraSubPack": "Qwen3VL (External llama.cpp)",
-    
-    "TextEncodeQwenImageEdit_MiraSubPack": "Text Encode QwenImage Edit Mira",
-    "TextEncodeQwenImageEditPlus_MiraSubPack": "Text Encode QwenImage Edit Plus Mira",
-    
     "ImageMergeByPixelAlign_MiraSubPack": "Image Merge By Pixel Align",
-    
+
     "MiraITUPipelineExtract_MiraSubPack": "Mira ITU Pipeline Extract",
     "MiraITUPipelineCombine_MiraSubPack": "Mira ITU Pipeline Combine",
     "ImageTiledKSamplerWithTagger_MiraSubPack": "Tiled Image KSampler with Tagger",
@@ -67,14 +42,12 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LatentUpscaleAndCropTiles_MiraSubPack": "Latent Upscale then Crop to Tiles",
     "MiraImageUpscaleCalculator_MiraSubPack": "Mira Image Upscale Calculator",
     "ImageTilesToLLM_MiraSubPack": "Image Tiles to LLM",
-    
+
     "VAEEncode_MiraSubPack": "VAE Encode (Mira SubPack)",
     "VAEDecode_MiraSubPack": "VAE Decode (Mira SubPack)",
-    
+
     "SageFP16Switch_MiraSubPack": "Sage FP16 Switch (Mira SubPack)",
     "UNETLoaderFP16Storage_MiraSubPack": "Load Diffusion Model FP16 Storage (Mira SubPack)",
-    
-    "ImageTilesToLLM_MiraSubPack": "Image Tiles to LLM",
 }
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

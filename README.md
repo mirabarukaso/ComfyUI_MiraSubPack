@@ -2,6 +2,39 @@
 More test nodes for my [ComfyUI_Mira](https://github.com/mirabarukaso/ComfyUI_Mira)
 
 
+## Image (Mira/SubPack)
+- **Image Merge By Pixel Align** `ImageMergeByPixelAlign_MiraSubPack`: SIFT-align a patch onto a base image, exclude a background color from the patch, and blend with core coverage + edge feathering.
+
+<img src="examples/ImageMergeByPixelAlign.png" width="600">
+
+<img src="examples/ImageMergeByPixelAlign_workflow.png" width="600">
+
+
+## Image Tiled Upscaler (Mira/SubPack/Image Tiled Upscaler)
+Typical path: crop tiles -> VAE encode -> tiled KSampler (optional per-tile tagger text) -> VAE decode -> color correction -> overlapped merge.
+
+- **Image Crop to Tiles** `ImageCropTiles_MiraSubPack`: Crop the image into overlapping tiles; outputs `mira_itu_pipeline` for merge nodes.
+- **Image Crop to Tiles by Pixels** `ImageCropTilesByPixels_MiraSubPack`: Same as above, but tile size is derived from a max megapixels-per-tile budget.
+- **Latent Upscale then Crop to Tiles** `LatentUpscaleAndCropTiles_MiraSubPack`: Upscale a latent (bislerp + optional variance matching), then split into overlapping tiles.
+- **Mira ITU Pipeline Extract** `MiraITUPipelineExtract_MiraSubPack` / **Mira ITU Pipeline Combine** `MiraITUPipelineCombine_MiraSubPack`: Unpack or rebuild the `mira_itu_pipeline` tuple (full/tile size, overlap, feather rate, pixel alignment).
+- **Tiled Image KSampler with Tagger** `ImageTiledKSamplerWithTagger_MiraSubPack`: Per-tile KSampler; one line of `tagger_text` per tile is appended to the positive prompt. `Normal` for SDXL/Z Image; `Reference` for Flux.2 with optional `ref_latents` + noise boost.
+- **Overlapped Latent Merge** `OverlappedLatentMerge_MiraSubPack` / **Overlapped Image Merge** `OverlappedImageMerge_MiraSubPack`: Feather-weighted merge of tiled latents or images using pipeline geometry.
+- **Tiled Image Color Correction** `TiledImageColorCorrection_MiraSubPack`: Match post-sampler tiles to pre-sampler reference tiles (histogram / LAB transfer, optional luminance + edge-preserving smooth).
+- **Mira Image Upscale Calculator** `MiraImageUpscaleCalculator_MiraSubPack`: If the input exceeds a megapixel limit, downscale it and recompute the effective upscale factor.
+- **Image Tiles to LLM** `ImageTilesToLLM_MiraSubPack`: Send each tile to an OpenAI-compatible API (e.g. llama.cpp `/v1`) and return newline-separated responses.
+
+Examples: `examples/MiraITU_workflow.png`, `examples/MiraITU_sample.png`, `examples/MiraITU_FLUX2_workflow.png`, `examples/MiraITU_FLUX2_prebake_workflow.png`, `examples/MiraITU_FLUX2_sample.png`, `examples/MiraITU_Anima_workflow.png`.
+
+<img src="examples/MiraITU_workflow.png" width="600">
+
+<img src="examples/MiraITU_FLUX2_workflow.png" width="600">
+
+
+## Utils (Mira/SubPack/Utils)
+- **VAE Encode (Mira SubPack)** `VAEEncode_MiraSubPack`: Encode images to latent; batch size > 1 encodes one image at a time to reduce VRAM peak.
+- **VAE Decode (Mira SubPack)** `VAEDecode_MiraSubPack`: Decode latents to images with the same per-item batch strategy.
+
+
 ## Model (Mira/SubPack/Model)
 - **Sage FP16 Switch (Mira SubPack)** `SageFP16Switch_MiraSubPack`: place after the model loader. Sets this model's compute dtype to fp16 and (optional) casts attention q/k/v to fp16 for SageAttention. Per-model, no global patch; bypass to disable. Useful on GPUs without bf16 (e.g. Turing).
 - **Load Diffusion Model FP16 Storage (Mira SubPack)** `UNETLoaderFP16Storage_MiraSubPack`: UNETLoader variant storing weights as fp16 (half VRAM of fp32).
@@ -66,4 +99,3 @@ Notes:
 - Fixed: `SageFP16Switch` could skip the fp16 switch (and run in fp32) when another dtype patch such as `ModelComputeDtype` had been loaded earlier on the same server, because it read the shared model's `manual_cast_dtype`. It now always applies fp16 when `compute_fp16` is on.
 
 <img src="examples/SageFP16Switch_QwenImage21_benchmark.jpg" width="1000">
-
