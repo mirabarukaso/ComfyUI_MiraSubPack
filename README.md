@@ -33,6 +33,7 @@ Examples: `examples/MiraITU_workflow.png`, `examples/MiraITU_sample.png`, `examp
 ## Utils (Mira/SubPack/Utils)
 - **VAE Encode (Mira SubPack)** `VAEEncode_MiraSubPack`: Encode images to latent. Batch > 1 encodes one image at a time. Temporarily disables the fused kitchen fp16 VAE path (safe on sm_75 / TITAN RTX with `--fast fp16_accumulation`). `mode`: `direct` or `tiled` (optional tile/overlap/temporal params).
 - **VAE Decode (Mira SubPack)** `VAEDecode_MiraSubPack`: Decode latents to images with the same batch strategy, fused-path bypass, and `direct` / `tiled` switch.
+- **VAE Safe Passthrough (Mira SubPack)** `VAESafePassthrough_MiraSubPack`: VAE → VAE proxy. Wraps `encode` / `decode` / `encode_tiled` / `decode_tiled` with the same fused-path bypass. Use when a node keeps the VAE socket and encodes/decodes **inside** Python (Impact Pack `FaceDetailer` → `utils.to_latent_image` / `vae.decode`), which graph rewrites of `VAEEncode`/`VAEDecode` cannot see. SAA Override VAE inserts this on FaceDetailer `vae` inputs.
 
 
 ## Model (Mira/SubPack/Model)

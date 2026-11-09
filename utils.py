@@ -5,6 +5,12 @@ from comfy_api.latest import io
 CAT = "Mira/SubPack/Utils"
 
 
+def _unwrap_vae(vae):
+    while isinstance(vae, SafeVAE):
+        vae = vae._vae
+    return vae
+
+
 @contextmanager
 def safe_vae_context(vae):
     """Temporarily disable fused kitchen fp16_conv3d path for VAE encode/decode.
@@ -13,6 +19,7 @@ def safe_vae_context(vae):
     unsupported CUTLASS Mma<16,8,16> and CUDA 719. Restores flags after the call
     so global --fast fp16_accumulation still applies to sampling.
     """
+    vae = _unwrap_vae(vae)
     mm = torch.backends.cuda.matmul
     had_acc = hasattr(mm, "allow_fp16_accumulation")
     old_acc = mm.allow_fp16_accumulation if had_acc else None
@@ -33,6 +40,46 @@ def safe_vae_context(vae):
             m.fused_norm = v
         if had_acc:
             mm.allow_fp16_accumulation = old_acc
+
+
+class SafeVAE:
+    """Proxy VAE that wraps encode/decode (and tiled variants) with safe_vae_context.
+
+    Impact Pack FaceDetailer / Detailer call stock nodes.VAEEncode or vae.decode
+    internally, so graph-level VAEEncode_MiraSubPack rewrites never see them.
+    Routing the VAE socket through this proxy covers those in-process calls
+    without forking Impact Pack.
+    """
+
+    __slots__ = ("_vae",)
+
+    def __init__(self, vae):
+        object.__setattr__(self, "_vae", _unwrap_vae(vae))
+
+    def encode(self, *args, **kwargs):
+        with safe_vae_context(self._vae):
+            return self._vae.encode(*args, **kwargs)
+
+    def decode(self, *args, **kwargs):
+        with safe_vae_context(self._vae):
+            return self._vae.decode(*args, **kwargs)
+
+    def encode_tiled(self, *args, **kwargs):
+        with safe_vae_context(self._vae):
+            return self._vae.encode_tiled(*args, **kwargs)
+
+    def decode_tiled(self, *args, **kwargs):
+        with safe_vae_context(self._vae):
+            return self._vae.decode_tiled(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_vae"), name)
+
+    def __setattr__(self, name, value):
+        if name == "_vae":
+            object.__setattr__(self, name, value)
+            return
+        setattr(object.__getattribute__(self, "_vae"), name, value)
 
 
 def _encode_one(vae, pixels, mode, tile_size, overlap, temporal_size, temporal_overlap):
@@ -307,3 +354,37 @@ class VAEDecode_Mira(io.ComfyNode):
                 image_list.append(single_image.cpu())
 
             return io.NodeOutput(torch.cat(image_list, dim=0))
+
+
+class VAESafePassthrough_Mira(io.ComfyNode):
+    """
+    VAE passthrough that returns a SafeVAE proxy. Place between a VAE loader and
+    nodes that encode/decode internally (e.g. Impact FaceDetailer).
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="VAESafePassthrough_MiraSubPack",
+            display_name="VAE Safe Passthrough (Mira SubPack)",
+            category=CAT,
+            description=(
+                "Pass-through VAE wrapper. encode/decode/encode_tiled/decode_tiled "
+                "temporarily disable fused kitchen fp16 VAE path (sm_75 safe). "
+                "Use when a node keeps the VAE socket and calls encode/decode inside "
+                "(Impact Pack FaceDetailer), which graph VAEEncode_MiraSubPack cannot rewrite."
+            ),
+            inputs=[
+                io.Vae.Input(
+                    "vae",
+                    tooltip="VAE to wrap. Output is a proxy; all other attributes forward.",
+                ),
+            ],
+            outputs=[
+                io.Vae.Output(display_name="vae"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, vae) -> io.NodeOutput:
+        return io.NodeOutput(SafeVAE(vae) if not isinstance(vae, SafeVAE) else vae)
